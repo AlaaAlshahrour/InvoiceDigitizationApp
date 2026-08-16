@@ -15,6 +15,7 @@ using InvoiceDigitizationApp.Services.AiServiceClient;
 using InvoiceDigitizationApp.Services.Batch;
 using InvoiceDigitizationApp.Services.Data;
 using InvoiceDigitizationApp.Services.Export;
+using InvoiceDigitizationApp.Services.Pipeline;
 using InvoiceDigitizationApp.Services.Validation;
 
 namespace InvoiceDigitizationApp.ViewModels;
@@ -48,9 +49,16 @@ public partial class ProcessingViewModel : ViewModelBase
     private readonly IInvoiceValidationService _validation;
     private readonly IDuplicateDetectionService _duplicates;
     private readonly IInvoiceBatchService _batch;
+    private readonly IPipelineConfigurationStore _pipeline;
 
     private int _editingInvoiceId;
     private string? _contentHash;
+
+    /// <summary>
+    /// How many ranked alternatives each picker offers. Read once per screen from
+    /// settings rather than per row, which would be a database hit per line item.
+    /// </summary>
+    private int _maxCandidates = CatalogMatcher.DefaultTopK;
 
     /// <summary>
     /// Paths of the preprocessed renderings for the invoice currently on screen, saved
@@ -74,8 +82,10 @@ public partial class ProcessingViewModel : ViewModelBase
         IExportService export,
         IInvoiceValidationService validation,
         IDuplicateDetectionService duplicates,
-        IInvoiceBatchService batch)
+        IInvoiceBatchService batch,
+        IPipelineConfigurationStore pipeline)
     {
+        _pipeline = pipeline;
         _aiService = aiService;
         _invoices = invoices;
         _products = products;
@@ -114,6 +124,18 @@ public partial class ProcessingViewModel : ViewModelBase
     [ObservableProperty] private decimal _totalAmount;
     [ObservableProperty] private string _selectedInvoiceType = nameof(InvoiceType.Purchase);
     [ObservableProperty] private Customer? _selectedCustomer;
+
+    /// <summary>
+    /// What the counterparty picker is set to. Separate from
+    /// <see cref="SelectedCustomer"/> because a picker entry carries a similarity score
+    /// alongside the contact, and the score is display-only.
+    /// </summary>
+    [ObservableProperty] private CustomerChoice? _selectedCustomerChoice;
+
+    partial void OnSelectedCustomerChoiceChanged(CustomerChoice? value)
+    {
+        if (value is not null) SelectedCustomer = value.Customer;
+    }
 
     // ---- image ------------------------------------------------------------
 
@@ -158,6 +180,21 @@ public partial class ProcessingViewModel : ViewModelBase
     public ObservableCollection<string> ValidationMessages { get; } = new();
     public ObservableCollection<Customer> Customers { get; } = new();
     public ObservableCollection<Product> Products { get; } = new();
+
+    /// <summary>
+    /// The counterparty picker's entries: the extraction's ranked suggestions first,
+    /// each with its similarity score, then the rest of the Customers table.
+    /// </summary>
+    public ObservableCollection<CustomerChoice> CustomerChoices { get; } = new();
+
+    /// <summary>
+    /// True when the service could not match the merchant confidently, so the
+    /// pre-selected contact is a guess the user is being asked to confirm.
+    /// </summary>
+    [ObservableProperty] private bool _merchantNeedsReview;
+
+    public string MerchantReviewText =>
+        $"لم يُطابَق اسم التاجر '{MerchantName}' بثقة كافية. اختر السجل الصحيح من القائمة.";
 
     public IReadOnlyList<string> InvoiceTypeOptions { get; } =
         new[] { nameof(InvoiceType.Purchase), nameof(InvoiceType.Sale) };
@@ -256,6 +293,36 @@ public partial class ProcessingViewModel : ViewModelBase
         var products = await _products.GetAllAsync();
         Products.Clear();
         foreach (var product in products) Products.Add(product);
+
+        _maxCandidates = (int)await _settings.GetDoubleAsync(
+            SettingKeys.MaxMatchCandidates, CatalogMatcher.DefaultTopK);
+
+        // Until an extraction supplies ranked candidates, the picker is simply the
+        // catalog in its own order.
+        RebuildCustomerChoices(candidates: null, ocrText: null);
+    }
+
+    /// <summary>
+    /// Rebuilds the counterparty picker so the extraction's suggestions sit at the top.
+    /// </summary>
+    private void RebuildCustomerChoices(
+        IReadOnlyList<MatchCandidate>? candidates, string? ocrText)
+    {
+        var previous = SelectedCustomer;
+
+        CustomerChoices.Clear();
+        foreach (var choice in MatchChoiceBuilder.ForCustomers(
+                     Customers, candidates, ocrText, _maxCandidates))
+        {
+            CustomerChoices.Add(choice);
+        }
+
+        // Re-point the picker at whatever was selected, since the entries it held are
+        // gone. Assigning the field would skip the sync back to SelectedCustomer, which
+        // is exactly what is wanted here: the contact has not changed.
+        SelectedCustomerChoice = previous is null
+            ? null
+            : CustomerChoices.FirstOrDefault(c => c.Customer.CustomerId == previous.CustomerId);
     }
 
     /// <summary>Loads an existing invoice from the database for review or editing.</summary>
@@ -304,7 +371,7 @@ public partial class ProcessingViewModel : ViewModelBase
         _ocrImagePath = null;
         _contentHash = await _duplicates.ComputeFileHashAsync(filePath, ct);
 
-        var options = BuildExtractionOptions();
+        var options = await BuildExtractionOptionsAsync(ct);
 
         SetStatus("جارٍ استخراج بيانات الفاتورة…");
 
@@ -355,13 +422,20 @@ public partial class ProcessingViewModel : ViewModelBase
     /// the batch, which must send exactly the same catalogs or the two would match
     /// merchants and products differently.
     /// </summary>
-    private ExtractionOptions BuildExtractionOptions() => new()
+    private async Task<ExtractionOptions> BuildExtractionOptionsAsync(
+        CancellationToken ct = default) => new()
     {
         InvoiceType = SelectedInvoiceType,
 
         // Ask for the preprocessed renderings so they can be persisted alongside the
         // original and shown when the original is hard to read.
         ReturnDebugImages = true,
+
+        MaxCandidates = _maxCandidates,
+
+        // Null when the user has never opened the settings page, which tells the service
+        // to run its own defaults rather than a copy of them frozen at install time.
+        Configuration = await _pipeline.GetAsync(ct),
 
         // Each contact travels as one record carrying every name it answers to. Name and
         // AliasName are equivalent match targets — invoices are printed with whichever
@@ -380,6 +454,17 @@ public partial class ProcessingViewModel : ViewModelBase
 
         KnownProducts = Products
             .Select(p => new KnownProduct { ProductId = p.ProductId, Name = p.Name })
+            .ToList(),
+
+        // There is no Cities table: the places this installation deals with are exactly
+        // the distinct Customers.City values, and matching against those beats matching
+        // against a generic gazetteer of every city in the region.
+        KnownCities = Customers
+            .Select(c => c.City)
+            .Where(city => !string.IsNullOrWhiteSpace(city))
+            .Select(city => city!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(city => new KnownCity { Name = city })
             .ToList()
     };
 
@@ -401,7 +486,8 @@ public partial class ProcessingViewModel : ViewModelBase
             var progress = new Progress<BatchProgress>(p =>
                 SetStatus($"جارٍ معالجة {p.CompletedCount} من {p.TotalCount}… ({p.CurrentFileName})"));
 
-            await _batch.StartAsync(paths, BuildExtractionOptions(), progress, ct);
+            await _batch.StartAsync(
+                paths, await BuildExtractionOptionsAsync(ct), progress, ct);
 
             if (_batch.TotalCount == 0)
             {
@@ -524,6 +610,8 @@ public partial class ProcessingViewModel : ViewModelBase
             InvoiceDate = null;
             TotalAmount = 0m;
             SelectedCustomer = null;
+            SelectedCustomerChoice = null;
+            MerchantNeedsReview = false;
             ImagePath = null;
             RawOcrText = null;
 
@@ -630,6 +718,15 @@ public partial class ProcessingViewModel : ViewModelBase
             _enhancedImagePath = invoice.EnhancedImagePath ?? _enhancedImagePath;
             _ocrImagePath = invoice.OcrImagePath ?? _ocrImagePath;
 
+            // The picker is rebuilt before the contact is resolved: ResolveCustomer sets
+            // SelectedCustomer, and the entry it should light up has to exist by then.
+            RebuildCustomerChoices(
+                extraction?.Header?.MerchantName?.Candidates,
+                extraction?.Header?.MerchantName?.Raw ?? invoice.MerchantName);
+
+            MerchantNeedsReview =
+                extraction?.Header?.MerchantName?.RequiresManualReview ?? false;
+
             ResolveCustomer(invoice);
 
             // Deliberately after ResolveCustomer, which populates City from the chosen
@@ -642,13 +739,20 @@ public partial class ProcessingViewModel : ViewModelBase
             Items.Clear();
             for (var i = 0; i < invoice.Items.Count; i++)
             {
-                // Line confidence comes from the extraction when present; a hand-entered
-                // or previously-saved row is treated as fully confident.
-                var confidence = extraction is not null && i < extraction.LineItems.Count
-                    ? extraction.LineItems[i].ProductName?.Confidence ?? 1.0
-                    : 1.0;
+                // Confidence and candidates come from the extraction when present; a
+                // hand-entered or previously-saved row is treated as fully confident and
+                // gets its suggestions from a local match instead.
+                var extracted = extraction is not null && i < extraction.LineItems.Count
+                    ? extraction.LineItems[i].ProductName
+                    : null;
 
-                AddRow(new InvoiceItemRowViewModel(invoice.Items[i], Products, confidence));
+                AddRow(new InvoiceItemRowViewModel(
+                    invoice.Items[i],
+                    Products,
+                    extracted?.Confidence ?? 1.0,
+                    extracted?.Candidates,
+                    extracted?.RequiresManualReview ?? false,
+                    _maxCandidates));
             }
 
             LinkProductsToCatalog();
@@ -826,7 +930,12 @@ public partial class ProcessingViewModel : ViewModelBase
             // Inserted rather than reloaded: refilling the collection would clear every
             // other row's picker, since their selections point into this very list.
             if (Products.All(p => p.ProductId != product.ProductId))
+            {
                 InsertProductSorted(product);
+
+                // Every row's picker has to offer the new product, not just this one.
+                foreach (var candidateRow in Items) candidateRow.RefreshChoices();
+            }
 
             // Other rows naming the same thing get linked in the same pass.
             LinkProductsToCatalog();
@@ -1132,6 +1241,17 @@ public partial class ProcessingViewModel : ViewModelBase
         // still written as a snapshot at save time — that is what the dashboard filters
         // and the analytics read, and it must not shift when a contact is later edited.
         City = value?.City;
+
+        // Keeps the picker in step when the contact is set from code — resolved from a
+        // match, or loaded with a saved invoice.
+        var choice = value is null
+            ? null
+            : CustomerChoices.FirstOrDefault(c => c.Customer.CustomerId == value.CustomerId);
+
+        if (!ReferenceEquals(choice, SelectedCustomerChoice)) SelectedCustomerChoice = choice;
+
+        // Once a contact is confirmed there is nothing left to review.
+        if (value is not null) MerchantNeedsReview = false;
 
         OnPropertyChanged(nameof(IsCustomerLinked));
     }

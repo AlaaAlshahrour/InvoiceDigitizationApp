@@ -205,13 +205,25 @@
                           the ViewModel so this screen and the validation messages always
                           use the one word.
                         -->
-                        <ComboBox Grid.Row="0" Grid.Column="0"
-                                  Header="{x:Bind ViewModel.CounterpartyLabel, Mode=OneWay}"
-                                  HorizontalAlignment="Stretch"
-                                  PlaceholderText="{x:Bind ViewModel.CounterpartyPlaceholder, Mode=OneWay}"
-                                  DisplayMemberPath="DisplayName"
-                                  ItemsSource="{x:Bind ViewModel.Customers}"
-                                  SelectedItem="{x:Bind ViewModel.SelectedCustomer, Mode=TwoWay}" />
+                        <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2">
+                            <ComboBox HorizontalAlignment="Stretch"
+                                      Header="{x:Bind ViewModel.CounterpartyLabel, Mode=OneWay}"
+                                      PlaceholderText="{x:Bind ViewModel.CounterpartyPlaceholder, Mode=OneWay}"
+                                      DisplayMemberPath="DisplayName"
+                                      ItemsSource="{x:Bind ViewModel.CustomerChoices}"
+                                      SelectedItem="{x:Bind ViewModel.SelectedCustomerChoice, Mode=TwoWay}" />
+
+                            <!--
+                              The list is ordered by how well each contact matched the
+                              letterhead, best first with its score, so confirming a
+                              correct read is one glance and correcting a wrong one is
+                              one click rather than a scroll through the whole table.
+                            -->
+                            <TextBlock Text="{x:Bind ViewModel.MerchantReviewText, Mode=OneWay}"
+                                       FontSize="11" TextWrapping="Wrap"
+                                       Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                       Visibility="{x:Bind ViewModel.MerchantNeedsReview, Mode=OneWay, Converter={StaticResource BoolToVisibility}}" />
+                        </StackPanel>
 
                         <!-- The number printed on the invoice itself, not the database id. -->
                         <TextBox Grid.Row="0" Grid.Column="1" Header="رقم الفاتورة المطبوع"
@@ -290,6 +302,11 @@
                               path here: anything the invoice mentions that is not in the
                               Products table has to be added there first, via the button
                               under the grid.
+
+                              The list is ordered by how well each product matched what
+                              was read on this line — best first, with its similarity
+                              score — so the right product is normally already selected
+                              and confirming it costs nothing.
                             -->
                             <controls:DataGridTemplateColumn Header="المنتج" Width="2*">
                                 <controls:DataGridTemplateColumn.CellTemplate>
@@ -297,9 +314,9 @@
                                         <ComboBox Margin="4,2"
                                                   HorizontalAlignment="Stretch"
                                                   PlaceholderText="اختر منتجًا"
-                                                  DisplayMemberPath="Name"
-                                                  ItemsSource="{x:Bind ProductCatalog}"
-                                                  SelectedItem="{x:Bind SelectedProduct, Mode=TwoWay}" />
+                                                  DisplayMemberPath="DisplayName"
+                                                  ItemsSource="{x:Bind ProductChoices}"
+                                                  SelectedItem="{x:Bind SelectedChoice, Mode=TwoWay}" />
                                     </DataTemplate>
                                 </controls:DataGridTemplateColumn.CellTemplate>
                             </controls:DataGridTemplateColumn>

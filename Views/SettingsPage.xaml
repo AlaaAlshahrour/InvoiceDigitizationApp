@@ -5,15 +5,129 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:pipeline="using:InvoiceDigitizationApp.Services.Pipeline"
+    xmlns:vm="using:InvoiceDigitizationApp.ViewModels"
     mc:Ignorable="d">
 
+    <Page.Resources>
+
+        <!--
+          One editable parameter. All four editors live in the same template and are
+          shown by kind rather than swapped by a DataTemplateSelector: the parameter
+          form is entirely data-driven from PipelineCatalog, so adding an algorithm to
+          the catalog needs no change here.
+        -->
+        <DataTemplate x:Key="ParameterTemplate" x:DataType="vm:PipelineParameterViewModel">
+            <StackPanel Spacing="2" Margin="0,0,0,10">
+                <TextBlock Text="{x:Bind Label}" FontSize="13" />
+
+                <!-- Number -->
+                <NumberBox Visibility="{x:Bind IsNumeric, Converter={StaticResource BoolToVisibility}}"
+                           Value="{x:Bind NumberValue, Mode=TwoWay}"
+                           Minimum="{x:Bind Minimum}"
+                           Maximum="{x:Bind Maximum}"
+                           SmallChange="{x:Bind SmallChange}"
+                           SpinButtonPlacementMode="Compact"
+                           FlowDirection="LeftToRight"
+                           HorizontalAlignment="Left"
+                           MinWidth="180" />
+
+                <!-- Choice -->
+                <ComboBox Visibility="{x:Bind IsChoice, Converter={StaticResource BoolToVisibility}}"
+                          ItemsSource="{x:Bind Choices}"
+                          SelectedItem="{x:Bind ChoiceValue, Mode=TwoWay}"
+                          HorizontalAlignment="Left"
+                          MinWidth="180" />
+
+                <!-- Pair of numbers, e.g. a kernel or tile grid size -->
+                <StackPanel Orientation="Horizontal" Spacing="8"
+                            Visibility="{x:Bind IsPair, Converter={StaticResource BoolToVisibility}}">
+                    <NumberBox Value="{x:Bind NumberValue, Mode=TwoWay}"
+                               Minimum="{x:Bind Minimum}" Maximum="{x:Bind Maximum}"
+                               SpinButtonPlacementMode="Compact"
+                               FlowDirection="LeftToRight" MinWidth="110" />
+                    <NumberBox Value="{x:Bind SecondNumberValue, Mode=TwoWay}"
+                               Header="{x:Bind SecondLabel}"
+                               Minimum="{x:Bind Minimum}" Maximum="{x:Bind Maximum}"
+                               SpinButtonPlacementMode="Compact"
+                               FlowDirection="LeftToRight" MinWidth="110" />
+                </StackPanel>
+
+                <!-- Boolean -->
+                <ToggleSwitch Visibility="{x:Bind IsBoolean, Converter={StaticResource BoolToVisibility}}"
+                              IsOn="{x:Bind BooleanValue, Mode=TwoWay}"
+                              HorizontalAlignment="Left" />
+
+                <TextBlock Text="{x:Bind Hint}" FontSize="11" Opacity="0.6" TextWrapping="Wrap"
+                           Visibility="{x:Bind HasHint, Converter={StaticResource BoolToVisibility}}" />
+            </StackPanel>
+        </DataTemplate>
+
+        <!-- How an algorithm appears in its dropdown. -->
+        <DataTemplate x:Key="AlgorithmTemplate" x:DataType="pipeline:PipelineAlgorithm">
+            <TextBlock Text="{x:Bind Label}" TextWrapping="NoWrap" />
+        </DataTemplate>
+
+        <!--
+          One step: enable toggle, algorithm picker when there is a choice, and the
+          parameter form for whichever algorithm is selected.
+        -->
+        <DataTemplate x:Key="StepTemplate" x:DataType="vm:PipelineStepViewModel">
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10">
+                <StackPanel Spacing="8">
+
+                    <Grid ColumnSpacing="10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock Text="{x:Bind Label}" FontWeight="SemiBold" />
+                            <TextBlock Text="{x:Bind Description}" FontSize="12" Opacity="0.65"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+
+                        <ToggleSwitch Grid.Column="1" VerticalAlignment="Top"
+                                      OnContent="مفعّل" OffContent="متوقف"
+                                      IsEnabled="{x:Bind CanDisable}"
+                                      IsOn="{x:Bind IsEnabled, Mode=TwoWay}" />
+                    </Grid>
+
+                    <ComboBox Header="الخوارزمية" HorizontalAlignment="Stretch"
+                              Visibility="{x:Bind HasAlgorithmChoice, Converter={StaticResource BoolToVisibility}}"
+                              ItemsSource="{x:Bind Algorithms}"
+                              ItemTemplate="{StaticResource AlgorithmTemplate}"
+                              SelectedItem="{x:Bind SelectedAlgorithm, Mode=TwoWay}" />
+
+                    <ItemsControl ItemsSource="{x:Bind Parameters}"
+                                  ItemTemplate="{StaticResource ParameterTemplate}"
+                                  Visibility="{x:Bind HasParameters, Mode=OneWay, Converter={StaticResource BoolToVisibility}}" />
+
+                    <TextBlock Text="{x:Bind NoParametersHint, Mode=OneWay}"
+                               FontSize="12" Opacity="0.6" TextWrapping="Wrap"
+                               Visibility="{x:Bind HasParameters, Mode=OneWay, Converter={StaticResource InverseBoolToVisibility}}" />
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+
+        <!-- A phase: a heading and the steps that belong to it. -->
+        <DataTemplate x:Key="PhaseTemplate" x:DataType="vm:PipelinePhaseViewModel">
+            <StackPanel Margin="0,0,0,8">
+                <TextBlock Text="{x:Bind Title}" Style="{StaticResource SectionHeaderStyle}" />
+                <ItemsControl ItemsSource="{x:Bind Steps}"
+                              ItemTemplate="{StaticResource StepTemplate}" />
+            </StackPanel>
+        </DataTemplate>
+    </Page.Resources>
+
     <ScrollViewer>
-        <StackPanel Padding="{StaticResource PagePadding}" Spacing="16" MaxWidth="820"
+        <StackPanel Padding="{StaticResource PagePadding}" Spacing="16" MaxWidth="880"
                     HorizontalAlignment="Left">
 
             <StackPanel>
                 <TextBlock Text="الإعدادات" Style="{StaticResource PageTitleStyle}" />
-                <TextBlock Text="الاتصال ومواقع التخزين والمظهر."
+                <TextBlock Text="الاتصال ومواقع التخزين والمظهر وإعدادات معالجة الفواتير."
                            Style="{StaticResource PageSubtitleStyle}" />
             </StackPanel>
 
@@ -96,8 +210,41 @@
                         <Slider Minimum="0" Maximum="1" StepFrequency="0.05" TickFrequency="0.25"
                                 Value="{x:Bind ViewModel.ConfidenceThreshold, Mode=TwoWay}" />
                     </StackPanel>
+
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="عدد الاقتراحات في قوائم المطابقة" />
+                        <TextBlock FontSize="12" Opacity="0.65" TextWrapping="Wrap"
+                                   Text="كم اسمًا مقترحًا تعرضه قائمة الزبون أو المنتج، مرتّبة من الأعلى تشابهًا." />
+                        <NumberBox Minimum="1" Maximum="25" SmallChange="1"
+                                   SpinButtonPlacementMode="Compact"
+                                   FlowDirection="LeftToRight" HorizontalAlignment="Left" MinWidth="160"
+                                   Value="{x:Bind CandidateCount(ViewModel.MaxMatchCandidates), Mode=OneWay}"
+                                   ValueChanged="MaxCandidates_ValueChanged" />
+                    </StackPanel>
                 </StackPanel>
             </Border>
+
+            <!-- Extraction pipeline -->
+            <StackPanel Spacing="8"
+                        Visibility="{x:Bind ViewModel.IsPipelineLoaded, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+
+                <TextBlock Text="معالجة الصورة" Style="{StaticResource PageTitleStyle}" FontSize="20" />
+                <TextBlock TextWrapping="Wrap" Opacity="0.7" FontSize="13"
+                           Text="ترتيب الخطوات تحدّده الخدمة. ما يمكنك ضبطه هنا هو تفعيل كل خطوة، والخوارزمية التي تنفّذها، وقيم إعداداتها." />
+                <TextBlock Text="{x:Bind ViewModel.PipelineSource, Mode=OneWay}"
+                           FontSize="12" Opacity="0.6" TextWrapping="Wrap" />
+
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Phases}"
+                              ItemTemplate="{StaticResource PhaseTemplate}" />
+
+                <TextBlock Text="التعرّف والمطابقة" Style="{StaticResource SectionHeaderStyle}" />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.RecognitionStages}"
+                              ItemTemplate="{StaticResource StepTemplate}" />
+
+                <Button Content="استعادة إعدادات المعالجة الافتراضية"
+                        Command="{x:Bind ViewModel.ReloadPipelineDefaultsCommand}"
+                        HorizontalAlignment="Left" />
+            </StackPanel>
 
             <!-- Actions -->
             <StackPanel Orientation="Horizontal" Spacing="10">

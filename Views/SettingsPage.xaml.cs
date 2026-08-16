@@ -35,6 +35,18 @@ public sealed partial class SettingsPage : Page
 
     public string DatabaseLabel(string path) => $"قاعدة البيانات: {path}";
 
+    /// <summary>NumberBox binds to a double; the setting itself is a count.</summary>
+    public double CandidateCount(int value) => value;
+
+    private void MaxCandidates_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        // NaN arrives when the box is cleared mid-edit; leaving the last good value
+        // stands rather than collapsing the setting to zero.
+        if (double.IsNaN(args.NewValue)) return;
+
+        ViewModel.MaxMatchCandidates = (int)args.NewValue;
+    }
+
     private void OnThemeChangeRequested(object? sender, string theme) =>
         (Application.Current as App)?.MainWindowInstance?.ApplyTheme(theme);
 

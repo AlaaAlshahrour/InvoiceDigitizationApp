@@ -137,6 +137,32 @@ public sealed class HttpAiServiceClient : IAiServiceClient
         }
     }
 
+    public async Task<PipelineConfiguration?> GetDefaultConfigurationAsync(
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var baseUri = await ResolveBaseUriAsync(ct).ConfigureAwait(false);
+            using var response = await _http
+                .GetAsync(new Uri(baseUri, "/api/v1/configuration"), ct).ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode) return null;
+
+            var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            return JsonSerializer.Deserialize<PipelineConfiguration>(body, JsonOptions);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // Same reasoning as the health probe: an unreachable service is an expected
+            // answer here, and the caller falls back to the contract's own defaults.
+            return null;
+        }
+    }
+
     public async Task<bool> WaitUntilReadyAsync(TimeSpan timeout, CancellationToken ct = default)
     {
         var deadline = Stopwatch.StartNew();

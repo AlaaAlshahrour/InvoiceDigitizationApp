@@ -1,8 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
+using InvoiceDigitizationApp.Helpers;
 using InvoiceDigitizationApp.Models;
+using InvoiceDigitizationApp.Services.AiServiceClient;
 
 namespace InvoiceDigitizationApp.ViewModels;
 
@@ -19,9 +22,13 @@ public partial class InvoiceItemRowViewModel : ObservableObject
     public InvoiceItemRowViewModel(
         InvoiceItem item,
         ObservableCollection<Product> productCatalog,
-        double confidence = 1.0)
+        double confidence = 1.0,
+        IReadOnlyList<MatchCandidate>? candidates = null,
+        bool requiresManualReview = false,
+        int topK = CatalogMatcher.DefaultTopK)
     {
         ProductCatalog = productCatalog;
+        RequiresManualReview = requiresManualReview;
 
         // Backing fields, not properties: loading a row must not be mistaken for the
         // user editing it, which would recalculate away the total printed on the paper.
@@ -36,6 +43,13 @@ public partial class InvoiceItemRowViewModel : ObservableObject
         Confidence = confidence;
         DetectedProductName = item.ProductName;
 
+        _candidates = candidates;
+        _topK = topK;
+
+        // The service's ranked candidates first, then the rest of the catalog. Built
+        // before the selection below so the picker has something to select into.
+        RebuildChoices();
+
         // A row arriving with an id is already catalog-backed; select it so the picker
         // opens on the right entry instead of looking empty.
         _selectedProduct = FindInCatalog(item.ProductId, item.ProductName);
@@ -44,7 +58,64 @@ public partial class InvoiceItemRowViewModel : ObservableObject
             _productId = _selectedProduct.ProductId;
             _productName = _selectedProduct.Name;
         }
+
+        _selectedChoice = FindChoice(_selectedProduct);
     }
+
+    /// <summary>
+    /// The picker's entries: the extraction's suggestions at the top with their
+    /// similarity scores, then every other catalog product.
+    /// </summary>
+    public ObservableCollection<ProductChoice> ProductChoices { get; } = new();
+
+    /// <summary>
+    /// True when the service could not match this line confidently. The row is
+    /// highlighted so the user knows the pre-selected product is a guess.
+    /// </summary>
+    public bool RequiresManualReview { get; }
+
+    /// <summary>How many of <see cref="ProductChoices"/> came from the extraction.</summary>
+    public int SuggestionCount => ProductChoices.Count(choice => choice.IsSuggestion);
+
+    public bool HasSuggestions => SuggestionCount > 0;
+
+    /// <summary>The extraction's candidates, kept so the picker can be rebuilt when the
+    /// catalog changes without losing the ranking the service produced.</summary>
+    private readonly IReadOnlyList<MatchCandidate>? _candidates;
+
+    private readonly int _topK;
+
+    /// <summary>
+    /// Rebuilds the picker against the current catalog. Called when a product is added
+    /// mid-review: the new entry has to appear in every row's list, not only the row it
+    /// was added from.
+    /// </summary>
+    public void RefreshChoices() => RebuildChoices();
+
+    private void RebuildChoices()
+    {
+        var previous = SelectedProduct;
+
+        ProductChoices.Clear();
+
+        foreach (var choice in MatchChoiceBuilder.ForProducts(
+                     ProductCatalog, _candidates, DetectedProductName, _topK))
+        {
+            ProductChoices.Add(choice);
+        }
+
+        // The entry the picker pointed at is gone; point it at the equivalent new one so
+        // a rebuild does not look like the user clearing the row.
+        SelectedChoice = FindChoice(previous);
+
+        OnPropertyChanged(nameof(SuggestionCount));
+        OnPropertyChanged(nameof(HasSuggestions));
+    }
+
+    private ProductChoice? FindChoice(Product? product) =>
+        product is null
+            ? null
+            : ProductChoices.FirstOrDefault(choice => choice.Product.ProductId == product.ProductId);
 
     public int ItemId { get; set; }
 
@@ -81,6 +152,18 @@ public partial class InvoiceItemRowViewModel : ObservableObject
     [ObservableProperty] private Product? _selectedProduct;
 
     /// <summary>
+    /// What the picker is set to. A separate property from <see cref="SelectedProduct"/>
+    /// because the picker's entries carry a similarity score alongside the product, and
+    /// the score is display-only — it must not reach the saved line.
+    /// </summary>
+    [ObservableProperty] private ProductChoice? _selectedChoice;
+
+    partial void OnSelectedChoiceChanged(ProductChoice? value)
+    {
+        if (value is not null) SelectedProduct = value.Product;
+    }
+
+    /// <summary>
     /// The name written to InvoiceItems. Mirrors the selected catalog entry once the row
     /// is linked, and holds the raw OCR text until then.
     /// </summary>
@@ -103,6 +186,12 @@ public partial class InvoiceItemRowViewModel : ObservableObject
 
         ProductId = value.ProductId;
         ProductName = value.Name;
+
+        // Keeps the picker in step when the product is set from code — a catalog link
+        // resolved after loading, or a product just added from this row.
+        var choice = FindChoice(value);
+        if (choice is not null && !ReferenceEquals(choice, SelectedChoice))
+            SelectedChoice = choice;
     }
 
     partial void OnProductIdChanged(int? value)

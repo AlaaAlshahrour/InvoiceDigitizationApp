@@ -13,4 +13,13 @@ public static class SettingKeys
     public const string ImageStorageDirectory = "ImageStorageDirectory";
     public const string AppTheme = "AppTheme";
     public const string ConfidenceThreshold = "ConfidenceThreshold";
+
+    /// <summary>
+    /// The extraction pipeline configuration, stored as one JSON blob matching
+    /// docs/settings-config-contract.md. Empty means "let the service use its defaults".
+    /// </summary>
+    public const string PipelineConfiguration = "PipelineConfiguration";
+
+    /// <summary>How many ranked candidates each matched field offers in its picker.</summary>
+    public const string MaxMatchCandidates = "MaxMatchCandidates";
 }

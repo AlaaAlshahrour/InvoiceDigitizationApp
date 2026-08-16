@@ -7,6 +7,7 @@ using InvoiceDigitizationApp.Services.AiServiceClient;
 using InvoiceDigitizationApp.Services.Batch;
 using InvoiceDigitizationApp.Services.Data;
 using InvoiceDigitizationApp.Services.Export;
+using InvoiceDigitizationApp.Services.Pipeline;
 using InvoiceDigitizationApp.Services.Validation;
 using InvoiceDigitizationApp.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
@@ -103,6 +104,10 @@ public partial class App : Application
         // pages, so a batch owned by the verification screen would be destroyed the
         // moment the user stepped over to another page mid-review.
         services.AddSingleton<IInvoiceBatchService, InvoiceBatchService>();
+
+        // Transient, because it resolves IAiServiceClient — which the HTTP factory
+        // rotates — to read the service's defaults.
+        services.AddTransient<IPipelineConfigurationStore, PipelineConfigurationStore>();
 
         // ---- view models ---------------------------------------------------
         // Transient: each navigation gets a clean screen with no leftover state.

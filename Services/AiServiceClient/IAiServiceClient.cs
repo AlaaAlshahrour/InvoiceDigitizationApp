@@ -17,6 +17,14 @@ public interface IAiServiceClient
     Task<HealthStatus?> GetHealthAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// The service's own default pipeline configuration, so the settings page opens on
+    /// the values it actually runs rather than a second copy hardcoded here.
+    /// Returns null when the service is unreachable — the page falls back to the
+    /// contract's documented defaults.
+    /// </summary>
+    Task<PipelineConfiguration?> GetDefaultConfigurationAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// Polls health until the engine reports ready or the timeout elapses.
     /// Returns false on timeout.
     /// </summary>
