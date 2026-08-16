@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Application
+    x:Class="InvoiceDigitizationApp.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:helpers="using:InvoiceDigitizationApp.Helpers"
+    xmlns:local="using:InvoiceDigitizationApp">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <ResourceDictionary Source="ms-appx:///Microsoft.UI.Xaml/DensityStyles/Compact.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <!-- Converters, shared by every page. -->
+            <helpers:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+            <helpers:BoolToVisibilityConverter x:Key="InverseBoolToVisibility" Invert="True" />
+            <helpers:StringToVisibilityConverter x:Key="StringToVisibility" />
+            <helpers:ArithmeticToBrushConverter x:Key="ArithmeticToBrush" />
+            <helpers:ConfidenceToBrushConverter x:Key="ConfidenceToBrush" />
+            <helpers:MoneyConverter x:Key="Money" />
+            <helpers:DecimalToDoubleConverter x:Key="DecimalToDouble" />
+            <helpers:HexToBrushConverter x:Key="HexToBrush" />
+            <helpers:CountToVisibilityConverter x:Key="CountToVisibility" />
+            <helpers:EnumDisplayConverter x:Key="EnumDisplay" />
+
+            <!-- Spacing scale, so padding stays consistent across screens. -->
+            <x:Double x:Key="PageMargin">20</x:Double>
+            <Thickness x:Key="PagePadding">20,16,20,16</Thickness>
+            <Thickness x:Key="CardPadding">16</Thickness>
+            <Thickness x:Key="StackGap">0,0,0,12</Thickness>
+
+            <Style x:Key="PageTitleStyle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="26" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+                <Setter Property="Margin" Value="0,0,0,4" />
+            </Style>
+
+            <Style x:Key="PageSubtitleStyle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="13" />
+                <Setter Property="Opacity" Value="0.7" />
+                <Setter Property="Margin" Value="0,0,0,16" />
+            </Style>
+
+            <Style x:Key="SectionHeaderStyle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="15" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+                <Setter Property="Margin" Value="0,0,0,8" />
+            </Style>
+
+            <!-- Card surface used for the analytics tiles and form panels. -->
+            <Style x:Key="CardStyle" TargetType="Border">
+                <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="8" />
+                <Setter Property="Padding" Value="16" />
+            </Style>
+
+            <!--
+              Amounts are forced LTR even though the app flows right-to-left, so a value
+              like 1,234.50 is not visually reordered by the bidi algorithm.
+            -->
+            <Style x:Key="NumericTextStyle" TargetType="TextBlock">
+                <Setter Property="FlowDirection" Value="LeftToRight" />
+                <Setter Property="HorizontalAlignment" Value="Right" />
+                <Setter Property="FontFamily" Value="Consolas" />
+            </Style>
+
+            <Style x:Key="NumericBoxStyle" TargetType="TextBox">
+                <Setter Property="FlowDirection" Value="LeftToRight" />
+                <Setter Property="TextAlignment" Value="Right" />
+            </Style>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

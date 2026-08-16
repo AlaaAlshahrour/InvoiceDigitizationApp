@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "InvoiceDigitizationApp (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "InvoiceDigitizationApp (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

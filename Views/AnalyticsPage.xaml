@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="InvoiceDigitizationApp.Views.AnalyticsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:InvoiceDigitizationApp.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <ScrollViewer>
+        <Grid Padding="{StaticResource PagePadding}" RowSpacing="16">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0">
+                <StackPanel>
+                    <TextBlock Text="التحليلات" Style="{StaticResource PageTitleStyle}" />
+                    <TextBlock Text="المبيعات والمشتريات والأكثر مبيعًا في لمحة."
+                               Style="{StaticResource PageSubtitleStyle}" />
+                </StackPanel>
+                <Button HorizontalAlignment="Right" VerticalAlignment="Top" Content="تحديث"
+                        Command="{x:Bind ViewModel.RefreshCommand}" />
+            </Grid>
+
+            <!-- Summary cards -->
+            <Grid Grid.Row="1" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0" Style="{StaticResource CardStyle}">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="إجمالي المبيعات" Opacity="0.7" FontSize="13" />
+                        <TextBlock FontSize="24" FontWeight="SemiBold" FlowDirection="LeftToRight"
+                                   HorizontalAlignment="Left"
+                                   Text="{x:Bind Money(ViewModel.TotalSales), Mode=OneWay}" />
+                    </StackPanel>
+                </Border>
+
+                <Border Grid.Column="1" Style="{StaticResource CardStyle}">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="إجمالي المشتريات" Opacity="0.7" FontSize="13" />
+                        <TextBlock FontSize="24" FontWeight="SemiBold" FlowDirection="LeftToRight"
+                                   HorizontalAlignment="Left"
+                                   Text="{x:Bind Money(ViewModel.TotalPurchases), Mode=OneWay}" />
+                    </StackPanel>
+                </Border>
+
+                <Border Grid.Column="2" Style="{StaticResource CardStyle}">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="صافي المركز" Opacity="0.7" FontSize="13" />
+                        <TextBlock FontSize="24" FontWeight="SemiBold" FlowDirection="LeftToRight"
+                                   HorizontalAlignment="Left"
+                                   Foreground="{x:Bind NetBrush(ViewModel.NetPosition), Mode=OneWay}"
+                                   Text="{x:Bind Money(ViewModel.NetPosition), Mode=OneWay}" />
+                    </StackPanel>
+                </Border>
+
+                <Border Grid.Column="3" Style="{StaticResource CardStyle}">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="فواتير هذا الشهر" Opacity="0.7" FontSize="13" />
+                        <TextBlock FontSize="24" FontWeight="SemiBold" FlowDirection="LeftToRight"
+                                   HorizontalAlignment="Left"
+                                   Text="{x:Bind ViewModel.InvoicesThisMonth, Mode=OneWay}" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <!-- Sales vs purchases, last 6 months -->
+            <Border Grid.Row="2" Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="المبيعات مقابل المشتريات — آخر 6 أشهر"
+                               Style="{StaticResource SectionHeaderStyle}" />
+
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.MonthlyBars}" HorizontalAlignment="Center">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" Spacing="24" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:MonthlyBar">
+                                <StackPanel Spacing="6" VerticalAlignment="Bottom">
+                                    <!-- Bars grow upward, so they sit in a bottom-aligned row. -->
+                                    <StackPanel Orientation="Horizontal" Spacing="6"
+                                                Height="170" VerticalAlignment="Bottom">
+                                        <Rectangle Width="26" Fill="#4C7DE0" VerticalAlignment="Bottom"
+                                                   RadiusX="3" RadiusY="3"
+                                                   Height="{x:Bind SalesHeight}"
+                                                   ToolTipService.ToolTip="المبيعات" />
+                                        <Rectangle Width="26" Fill="#E0724C" VerticalAlignment="Bottom"
+                                                   RadiusX="3" RadiusY="3"
+                                                   Height="{x:Bind PurchasesHeight}"
+                                                   ToolTipService.ToolTip="المشتريات" />
+                                    </StackPanel>
+                                    <TextBlock Text="{x:Bind Label}" HorizontalAlignment="Center"
+                                               FontSize="12" Opacity="0.7" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!-- Legend -->
+                    <StackPanel Orientation="Horizontal" Spacing="16" HorizontalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Rectangle Width="12" Height="12" Fill="#4C7DE0" RadiusX="2" RadiusY="2" />
+                            <TextBlock Text="المبيعات" FontSize="12" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Rectangle Width="12" Height="12" Fill="#E0724C" RadiusX="2" RadiusY="2" />
+                            <TextBlock Text="المشتريات" FontSize="12" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Best sellers -->
+            <Border Grid.Row="3" Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="الأكثر مبيعًا حسب الإيرادات"
+                               Style="{StaticResource SectionHeaderStyle}" />
+
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.TopProducts}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ProductShare">
+                                <Grid ColumnSpacing="12" Margin="0,4">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="180" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Grid.Column="0" Text="{x:Bind ProductName}"
+                                               TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+
+                                    <!--
+                                      A proportional bar rather than a pie: comparing lengths
+                                      along a shared baseline is far more precise than
+                                      comparing angles.
+                                    -->
+                                    <Rectangle Grid.Column="1" Height="18" HorizontalAlignment="Left"
+                                               RadiusX="3" RadiusY="3"
+                                               Width="{x:Bind BarWidth}"
+                                               Fill="{x:Bind ColorHex, Converter={StaticResource HexToBrush}}" />
+
+                                    <TextBlock Grid.Column="2" VerticalAlignment="Center"
+                                               FlowDirection="LeftToRight" FontSize="12" Opacity="0.75"
+                                               Text="{x:Bind ShareLabel}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <TextBlock Text="لا توجد بيانات منتجات بعد." Opacity="0.6"
+                               Visibility="{x:Bind NoProducts(ViewModel.TopProducts.Count), Mode=OneWay}" />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </ScrollViewer>
+</Page>

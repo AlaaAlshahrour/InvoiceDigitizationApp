@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="InvoiceDigitizationApp.Views.InvoicesDashboardPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:CommunityToolkit.WinUI.UI.Controls"
+    xmlns:models="using:InvoiceDigitizationApp.Models"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Padding="{StaticResource PagePadding}" RowSpacing="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Title -->
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="الفواتير" Style="{StaticResource PageTitleStyle}" />
+            <TextBlock Text="ابحث في الفواتير المرقمنة وصفّها وأدرها."
+                       Style="{StaticResource PageSubtitleStyle}" />
+        </StackPanel>
+
+        <!-- Search + primary actions -->
+        <Grid Grid.Row="1" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <TextBox
+                Grid.Column="0"
+                PlaceholderText="ابحث برقم الفاتورة أو اسم المورد…"
+                Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                KeyDown="SearchBox_KeyDown" />
+
+            <Button Grid.Column="1" Content="بحث" Command="{x:Bind ViewModel.SearchCommand}" />
+
+            <ToggleButton Grid.Column="2" IsChecked="{x:Bind ViewModel.IsFilterPaneOpen, Mode=TwoWay}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE71C;" FontSize="14" />
+                    <TextBlock Text="عوامل التصفية" />
+                </StackPanel>
+            </ToggleButton>
+
+            <Button Grid.Column="3" Style="{StaticResource AccentButtonStyle}"
+                    Command="{x:Bind ViewModel.ImportInvoiceCommand}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE710;" FontSize="14" />
+                    <TextBlock Text="استيراد فاتورة" />
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <!-- Advanced filters -->
+        <Border Grid.Row="2" Style="{StaticResource CardStyle}"
+                Visibility="{x:Bind ViewModel.IsFilterPaneOpen, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+            <Grid ColumnSpacing="12" RowSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="من تاريخ" />
+                <DatePicker Grid.Row="1" Grid.Column="0"
+                            SelectedDate="{x:Bind ViewModel.DateFrom, Mode=TwoWay}" />
+
+                <TextBlock Grid.Row="0" Grid.Column="1" Text="إلى تاريخ" />
+                <DatePicker Grid.Row="1" Grid.Column="1"
+                            SelectedDate="{x:Bind ViewModel.DateTo, Mode=TwoWay}" />
+
+                <TextBlock Grid.Row="0" Grid.Column="2" Text="النوع" />
+                <ComboBox Grid.Row="1" Grid.Column="2" HorizontalAlignment="Stretch"
+                          ItemsSource="{x:Bind ViewModel.TypeOptions}"
+                          SelectedItem="{x:Bind ViewModel.SelectedType, Mode=TwoWay}">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate x:DataType="x:String">
+                            <TextBlock Text="{x:Bind Converter={StaticResource EnumDisplay}}" />
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+
+                <TextBlock Grid.Row="0" Grid.Column="3" Text="المدينة" />
+                <ComboBox Grid.Row="1" Grid.Column="3" HorizontalAlignment="Stretch"
+                          IsEditable="False"
+                          PlaceholderText="أي مدينة"
+                          ItemsSource="{x:Bind ViewModel.Cities}"
+                          SelectedItem="{x:Bind ViewModel.SelectedCity, Mode=TwoWay}" />
+
+                <Button Grid.Row="1" Grid.Column="4" Content="مسح"
+                        Command="{x:Bind ViewModel.ClearFiltersCommand}" />
+            </Grid>
+        </Border>
+
+        <!-- Results grid -->
+        <Border Grid.Row="3" Style="{StaticResource CardStyle}" Padding="0">
+            <Grid>
+                <controls:DataGrid
+                    x:Name="InvoicesGrid"
+                    AutoGenerateColumns="False"
+                    IsReadOnly="True"
+                    GridLinesVisibility="Horizontal"
+                    SelectionMode="Single"
+                    ItemsSource="{x:Bind ViewModel.Invoices}"
+                    SelectedItem="{x:Bind ViewModel.SelectedInvoice, Mode=TwoWay}"
+                    DoubleTapped="InvoicesGrid_DoubleTapped">
+
+                    <controls:DataGrid.Columns>
+                        <controls:DataGridTextColumn Header="المعرّف" Width="70"
+                            Binding="{Binding InvoiceId}" />
+                        <controls:DataGridTextColumn Header="رقم الفاتورة" Width="130"
+                            Binding="{Binding InvoiceNumber}" />
+                        <controls:DataGridTextColumn Header="المورد" Width="*"
+                            Binding="{Binding MerchantName}" />
+                        <controls:DataGridTextColumn Header="المدينة" Width="120"
+                            Binding="{Binding City}" />
+                        <controls:DataGridTextColumn Header="التاريخ" Width="110"
+                            Binding="{Binding InvoiceDate}" />
+                        <controls:DataGridTextColumn Header="النوع" Width="100"
+                            Binding="{Binding InvoiceType, Converter={StaticResource EnumDisplay}}" />
+                        <controls:DataGridTextColumn Header="الإجمالي" Width="120"
+                            Binding="{Binding TotalAmount}" />
+                    </controls:DataGrid.Columns>
+                </controls:DataGrid>
+
+                <!-- Empty state -->
+                <StackPanel
+                    x:Name="EmptyState"
+                    HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8"
+                    Visibility="{x:Bind IsEmpty(ViewModel.ResultCount), Mode=OneWay}">
+                    <FontIcon Glyph="&#xE9F9;" FontSize="40" Opacity="0.35" />
+                    <TextBlock Text="لا توجد فواتير لعرضها" HorizontalAlignment="Center" Opacity="0.7" />
+                    <Button Content="استورد أول فاتورة"
+                            HorizontalAlignment="Center"
+                            Command="{x:Bind ViewModel.ImportInvoiceCommand}" />
+                </StackPanel>
+
+                <ProgressRing
+                    IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Width="36" Height="36" />
+            </Grid>
+        </Border>
+
+        <!-- Footer: row actions + status -->
+        <Grid Grid.Row="4" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Button Grid.Column="0" Content="فتح" Command="{x:Bind ViewModel.OpenSelectedCommand}" />
+            <Button Grid.Column="1" Content="حذف" Click="Delete_Click" />
+
+            <Button Grid.Column="2" Content="تصدير إلى Excel"
+                    Command="{x:Bind ViewModel.ExportCommand}" CommandParameter="excel" />
+            <Button Grid.Column="3" Content="تصدير إلى CSV"
+                    Command="{x:Bind ViewModel.ExportCommand}" CommandParameter="csv" />
+
+            <TextBlock
+                Grid.Column="4"
+                VerticalAlignment="Center"
+                Margin="12,0,0,0"
+                TextTrimming="CharacterEllipsis"
+                Text="{x:Bind ViewModel.StatusMessage, Mode=OneWay}"
+                Foreground="{x:Bind ErrorBrush(ViewModel.HasError), Mode=OneWay}" />
+        </Grid>
+    </Grid>
+</Page>

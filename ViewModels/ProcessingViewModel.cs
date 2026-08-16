@@ -1,0 +1,1158 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using InvoiceDigitizationApp.Helpers;
+using InvoiceDigitizationApp.Models;
+using InvoiceDigitizationApp.Services.AiServiceClient;
+using InvoiceDigitizationApp.Services.Batch;
+using InvoiceDigitizationApp.Services.Data;
+using InvoiceDigitizationApp.Services.Export;
+using InvoiceDigitizationApp.Services.Validation;
+
+namespace InvoiceDigitizationApp.ViewModels;
+
+/// <summary>Which rendering of the invoice the image pane is showing.</summary>
+public enum InvoiceImageView
+{
+    /// <summary>The imported copy of the user's own file.</summary>
+    Original,
+
+    /// <summary>The service's enhanced grayscale rendering, before binarization.</summary>
+    Enhanced,
+
+    /// <summary>The exact binarized image the OCR engine read.</summary>
+    OcrInput
+}
+
+/// <summary>
+/// The side-by-side verification screen: original image on one side, editable extracted
+/// data on the other. This is the core of the product — everything OCR produces passes
+/// through here for human confirmation before it is saved.
+/// </summary>
+public partial class ProcessingViewModel : ViewModelBase
+{
+    private readonly IAiServiceClient _aiService;
+    private readonly IInvoiceRepository _invoices;
+    private readonly IProductRepository _products;
+    private readonly ICustomerRepository _customers;
+    private readonly ISettingsRepository _settings;
+    private readonly IExportService _export;
+    private readonly IInvoiceValidationService _validation;
+    private readonly IDuplicateDetectionService _duplicates;
+    private readonly IInvoiceBatchService _batch;
+
+    private int _editingInvoiceId;
+    private string? _contentHash;
+
+    /// <summary>
+    /// Paths of the preprocessed renderings for the invoice currently on screen, saved
+    /// alongside it so the record keeps a copy of what the OCR engine actually read.
+    /// </summary>
+    private string? _enhancedImagePath;
+    private string? _ocrImagePath;
+
+    /// <summary>
+    /// Set while a whole invoice is being loaded into the form, so the per-row edit
+    /// handler does not run validation once for every row being populated.
+    /// </summary>
+    private bool _isApplyingInvoice;
+
+    public ProcessingViewModel(
+        IAiServiceClient aiService,
+        IInvoiceRepository invoices,
+        IProductRepository products,
+        ICustomerRepository customers,
+        ISettingsRepository settings,
+        IExportService export,
+        IInvoiceValidationService validation,
+        IDuplicateDetectionService duplicates,
+        IInvoiceBatchService batch)
+    {
+        _aiService = aiService;
+        _invoices = invoices;
+        _products = products;
+        _customers = customers;
+        _settings = settings;
+        _export = export;
+        _validation = validation;
+        _duplicates = duplicates;
+        _batch = batch;
+
+        Items.CollectionChanged += OnItemsCollectionChanged;
+        _batch.Changed += OnBatchChanged;
+    }
+
+    /// <summary>
+    /// Unsubscribes from the batch service. Called from the page's OnNavigatedFrom: the
+    /// service is a singleton and would otherwise hold every ViewModel the user has ever
+    /// navigated to alive for the life of the process.
+    /// </summary>
+    public void Detach()
+    {
+        _batch.Changed -= OnBatchChanged;
+    }
+
+    // ---- header fields ----------------------------------------------------
+
+    /// <summary>
+    /// The name written to Invoices.MerchantName. Mirrors the selected contact rather
+    /// than being typed: an invoice always belongs to a row of the Customers table.
+    /// </summary>
+    [ObservableProperty] private string _merchantName = string.Empty;
+
+    [ObservableProperty] private string? _invoiceNumber;
+    [ObservableProperty] private string? _city;
+    [ObservableProperty] private DateTimeOffset? _invoiceDate;
+    [ObservableProperty] private decimal _totalAmount;
+    [ObservableProperty] private string _selectedInvoiceType = nameof(InvoiceType.Purchase);
+    [ObservableProperty] private Customer? _selectedCustomer;
+
+    // ---- image ------------------------------------------------------------
+
+    [ObservableProperty] private string? _imagePath;
+    [ObservableProperty] private double _zoomFactor = 1.0;
+
+    /// <summary>
+    /// Which rendering the image pane shows. Defaults to the enhanced grayscale: it is
+    /// the most legible of the three on a poorly-lit phone photo, which is what most
+    /// imports are, and it is available for any source the service accepts.
+    /// </summary>
+    [ObservableProperty] private InvoiceImageView _selectedImageView = InvoiceImageView.Enhanced;
+
+    // Stored rather than computed. A File.Exists on every binding evaluation would hit
+    // the disk during layout; these are refreshed explicitly whenever the invoice changes.
+    [ObservableProperty] private bool _hasOriginalImage;
+    [ObservableProperty] private bool _hasEnhancedImage;
+    [ObservableProperty] private bool _hasOcrImage;
+
+    /// <summary>True when at least one of the three renderings exists on disk.</summary>
+    public bool HasAnyViewableImage => HasOriginalImage || HasEnhancedImage || HasOcrImage;
+
+    /// <summary>The file backing <see cref="SelectedImageView"/>, or null if absent.</summary>
+    public string? CurrentImagePath => SelectedImageView switch
+    {
+        InvoiceImageView.Enhanced => HasEnhancedImage ? _enhancedImagePath : null,
+        InvoiceImageView.OcrInput => HasOcrImage ? _ocrImagePath : null,
+        _ => HasOriginalImage ? ImagePath : null
+    };
+
+    // ---- pane layout ------------------------------------------------------
+
+    [ObservableProperty] private bool _isFormPaneVisible = true;
+    [ObservableProperty] private bool _isImagePaneVisible = true;
+
+    // ---- state ------------------------------------------------------------
+
+    [ObservableProperty] private bool _hasUnsavedChanges;
+    [ObservableProperty] private string? _rawOcrText;
+
+    public ObservableCollection<InvoiceItemRowViewModel> Items { get; } = new();
+    public ObservableCollection<string> ValidationMessages { get; } = new();
+    public ObservableCollection<Customer> Customers { get; } = new();
+    public ObservableCollection<Product> Products { get; } = new();
+
+    public IReadOnlyList<string> InvoiceTypeOptions { get; } =
+        new[] { nameof(InvoiceType.Purchase), nameof(InvoiceType.Sale) };
+
+    // ---- counterparty naming ----------------------------------------------
+
+    /// <summary>
+    /// What the other party to this invoice is called. A sale is made to a customer, a
+    /// purchase is made from a supplier — the same Customers row, named for its role.
+    /// </summary>
+    public string CounterpartyLabel =>
+        SelectedInvoiceType == nameof(InvoiceType.Sale) ? "العميل" : "المورد";
+
+    public string CounterpartyPlaceholder =>
+        SelectedInvoiceType == nameof(InvoiceType.Sale)
+            ? "اختر العميل"
+            : "اختر المورد";
+
+    /// <summary>Sum of the line items, shown in the footer and recomputed on every edit.</summary>
+    public decimal ComputedTotal => Items.Sum(i => i.TotalPrice);
+
+    /// <summary>True when the line items disagree with the header total.</summary>
+    public bool TotalsDisagree =>
+        Items.Count > 0 && Math.Abs(ComputedTotal - TotalAmount) > 0.05m;
+
+    public string TotalComparisonText => TotalsDisagree
+        ? $"مجموع البنود {ComputedTotal:N2} لكن الفاتورة تشير إلى {TotalAmount:N2}"
+        : $"الإجمالي: {ComputedTotal:N2}";
+
+    public bool HasValidationMessages => ValidationMessages.Count > 0;
+
+    public int InvalidRowCount => Items.Count(i => !i.IsArithmeticValid);
+
+    /// <summary>Rows still naming a product that is not in the catalog.</summary>
+    public int UnlinkedRowCount => Items.Count(i => !i.IsProductLinked);
+
+    public bool HasUnlinkedRows => UnlinkedRowCount > 0;
+
+    public string UnlinkedRowsText =>
+        $"{UnlinkedRowCount} بند غير مرتبط بمنتج مسجّل. اختر منتجًا من القائمة أو أضِف المنتج إلى قائمة المنتجات.";
+
+    /// <summary>True once a contact is chosen; saving is blocked until then.</summary>
+    public bool IsCustomerLinked => SelectedCustomer is not null;
+
+    // ---- batch ------------------------------------------------------------
+    // Read-through projections of the batch singleton. The View binds to these in a
+    // later phase; they are kept in step by the Changed subscription below.
+
+    public bool IsBatchActive => _batch.IsActive;
+    public bool IsBatchProcessing => _batch.IsProcessing;
+    public string BatchPositionLabel => _batch.PositionLabel;
+    public int BatchTotalCount => _batch.TotalCount;
+    public int BatchReviewedCount => _batch.ReviewedCount;
+
+    private void OnBatchChanged(object? sender, EventArgs e) => RefreshBatchState();
+
+    private void RefreshBatchState()
+    {
+        OnPropertyChanged(nameof(IsBatchActive));
+        OnPropertyChanged(nameof(IsBatchProcessing));
+        OnPropertyChanged(nameof(BatchPositionLabel));
+        OnPropertyChanged(nameof(BatchTotalCount));
+        OnPropertyChanged(nameof(BatchReviewedCount));
+
+        NextBatchItemCommand.NotifyCanExecuteChanged();
+        PreviousBatchItemCommand.NotifyCanExecuteChanged();
+        SkipBatchItemCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>Raised when duplicates are found on save; the View shows the dialog.</summary>
+    public event EventHandler<IReadOnlyList<DuplicateMatch>>? DuplicatesDetected;
+
+    /// <summary>Raised after a successful save, carrying the invoice id.</summary>
+    public event EventHandler<int>? InvoiceSaved;
+
+    // ---- loading ----------------------------------------------------------
+
+    public async Task InitializeAsync()
+    {
+        await RunGuardedAsync(async () =>
+        {
+            await LoadCatalogsAsync();
+        }, "تعذّر تحميل البيانات المرجعية");
+    }
+
+    /// <summary>
+    /// Refreshes the pickers' backing catalogs. Always called before rows are built, so
+    /// a row's product list is never emptied out from under an open selection.
+    /// </summary>
+    private async Task LoadCatalogsAsync()
+    {
+        var customers = await _customers.GetAllAsync();
+        Customers.Clear();
+        foreach (var customer in customers) Customers.Add(customer);
+
+        var products = await _products.GetAllAsync();
+        Products.Clear();
+        foreach (var product in products) Products.Add(product);
+    }
+
+    /// <summary>Loads an existing invoice from the database for review or editing.</summary>
+    public async Task LoadInvoiceAsync(int invoiceId)
+    {
+        await RunGuardedAsync(async () =>
+        {
+            await LoadCatalogsAsync();
+
+            var invoice = await _invoices.GetByIdAsync(invoiceId);
+            if (invoice is null)
+            {
+                SetError($"لم يتم العثور على السجل رقم {invoiceId}.");
+                return;
+            }
+
+            ApplyInvoice(invoice);
+            _editingInvoiceId = invoice.InvoiceId;
+            _contentHash = invoice.ContentHash;
+            HasUnsavedChanges = false;
+
+            SetStatus($"تم تحميل السجل رقم {invoiceId}.");
+        }, "تعذّر تحميل الفاتورة");
+    }
+
+    /// <summary>
+    /// Sends a file to the AI service and populates the form from the result. The image
+    /// is displayed regardless of whether extraction succeeds, so the user can always
+    /// fall back to typing the invoice in by hand.
+    /// </summary>
+    public async Task ProcessFileAsync(string filePath, CancellationToken ct = default) =>
+        await RunGuardedAsync(() => ProcessFileCoreAsync(filePath, ct), "فشلت المعالجة");
+
+    /// <summary>
+    /// The body of <see cref="ProcessFileAsync"/> without the busy guard, so batch entry
+    /// points — which are guarded once at their own top level — can reuse it. A guarded
+    /// method calling another guarded method would deadlock on the IsBusy flag.
+    /// </summary>
+    private async Task ProcessFileCoreAsync(string filePath, CancellationToken ct = default)
+    {
+        await LoadCatalogsAsync();
+
+        ImagePath = filePath;
+        _editingInvoiceId = 0;
+        _enhancedImagePath = null;
+        _ocrImagePath = null;
+        _contentHash = await _duplicates.ComputeFileHashAsync(filePath, ct);
+
+        var options = BuildExtractionOptions();
+
+        SetStatus("جارٍ استخراج بيانات الفاتورة…");
+
+        ExtractionResult result;
+        try
+        {
+            result = await _aiService.ExtractAsync(filePath, options, ct);
+        }
+        catch (AiServiceException ex)
+        {
+            // Keep the image loaded so manual entry remains possible.
+            SetError(ex.Code == AiServiceException.TransportError
+                ? $"{ex.Message} لا يزال بإمكانك إدخال هذه الفاتورة يدويًا."
+                : $"فشل الاستخراج ({ex.Code}): {ex.Message}");
+
+            RefreshImageAvailability();
+            return;
+        }
+
+        var invoice = ExtractionMapper.ToInvoice(
+            result,
+            Enum.TryParse<InvoiceType>(SelectedInvoiceType, out var type)
+                ? type : InvoiceType.Purchase);
+
+        invoice.ImagePath = filePath;
+        invoice.ContentHash = _contentHash;
+
+        // A freshly extracted invoice carries no stored city snapshot, so the city
+        // follows whichever contact the merchant resolves to. ApplyInvoice assigns City
+        // after ResolveCustomer, and a null here is what lets the contact's value stand.
+        invoice.City = null;
+
+        ApplyInvoice(invoice, result);
+
+        RawOcrText = result.RawText;
+        HasUnsavedChanges = true;
+
+        Validate();
+
+        var warnings = result.Warnings.Count;
+        SetStatus(warnings == 0
+            ? $"تم استخراج {Items.Count} بند خلال {result.ProcessingMs} مللي ثانية. راجع واحفظ."
+            : $"تم استخراج {Items.Count} بند مع {warnings} تحذير. راجع بعناية.");
+    }
+
+    /// <summary>
+    /// Builds the options sent with every extraction. Shared by the single-file path and
+    /// the batch, which must send exactly the same catalogs or the two would match
+    /// merchants and products differently.
+    /// </summary>
+    private ExtractionOptions BuildExtractionOptions() => new()
+    {
+        InvoiceType = SelectedInvoiceType,
+
+        // Ask for the preprocessed renderings so they can be persisted alongside the
+        // original and shown when the original is hard to read.
+        ReturnDebugImages = true,
+
+        // Each contact travels as one record carrying every name it answers to. Name and
+        // AliasName are equivalent match targets — invoices are printed with whichever
+        // the merchant happens to use — and the service replies with the CustomerId
+        // either way, so the match resolves to a record rather than to a loose string.
+        KnownMerchants = Customers
+            .Select(c => new KnownMerchant
+            {
+                CustomerId = c.CustomerId,
+                Name = c.Name,
+                Aliases = CatalogMatcher.NamesOf(c)
+                    .Where(n => !string.Equals(n, c.Name, StringComparison.OrdinalIgnoreCase))
+                    .ToList()
+            })
+            .ToList(),
+
+        KnownProducts = Products
+            .Select(p => new KnownProduct { ProductId = p.ProductId, Name = p.Name })
+            .ToList()
+    };
+
+    // ---- batch ------------------------------------------------------------
+
+    /// <summary>
+    /// Runs an imported set of files through the service, then shows the first one for
+    /// review. A single-file import comes through here too, as a batch of one, so there
+    /// is only one processing path to reason about.
+    /// </summary>
+    public async Task StartBatchAsync(IReadOnlyList<string> paths, CancellationToken ct = default)
+    {
+        if (paths.Count == 0) return;
+
+        await RunGuardedAsync(async () =>
+        {
+            await LoadCatalogsAsync();
+
+            var progress = new Progress<BatchProgress>(p =>
+                SetStatus($"جارٍ معالجة {p.CompletedCount} من {p.TotalCount}… ({p.CurrentFileName})"));
+
+            await _batch.StartAsync(paths, BuildExtractionOptions(), progress, ct);
+
+            if (_batch.TotalCount == 0)
+            {
+                SetStatus("لم يتم استيراد أي ملفات.");
+                return;
+            }
+
+            await ShowBatchItemCoreAsync();
+
+            var failed = _batch.Items.Count(i => i.State == BatchItemState.Failed);
+            if (failed > 0)
+                SetError($"تمت معالجة {_batch.TotalCount} ملف، وفشل {failed} منها. راجع الباقي.");
+        }, "فشلت معالجة الدفعة");
+    }
+
+    /// <summary>
+    /// Re-displays the batch item the user was on. Called when the verification screen is
+    /// navigated to with no parameter — the Frame does not cache pages, so returning from
+    /// another screen rebuilds this one and it has to pick the review back up.
+    /// </summary>
+    public async Task ResumeBatchAsync()
+    {
+        if (!_batch.IsActive) return;
+
+        await RunGuardedAsync(async () =>
+        {
+            await LoadCatalogsAsync();
+            await ShowBatchItemCoreAsync();
+        }, "تعذّر استئناف الدفعة");
+    }
+
+    /// <summary>
+    /// Loads <see cref="IInvoiceBatchService.Current"/> into the form. Unguarded: every
+    /// caller is already inside a guard, or is itself running under one.
+    /// </summary>
+    private async Task ShowBatchItemCoreAsync()
+    {
+        // A finished item means the cursor has nowhere left to go — the last one was just
+        // saved or skipped and MoveNext found no successor.
+        if (_batch.Current is not { IsFinished: false } item)
+        {
+            ClearForm();
+            SetStatus("اكتملت مراجعة كل فواتير الدفعة.");
+            RefreshBatchState();
+            return;
+        }
+
+        _editingInvoiceId = 0;
+        ImagePath = item.SourcePath;
+        _contentHash = item.ContentHash;
+        _enhancedImagePath = item.EnhancedImagePath;
+        _ocrImagePath = item.OcrImagePath;
+
+        if (item.State == BatchItemState.Failed || item.Result is null)
+        {
+            // Nothing was extracted, but the image is still on screen and the form is
+            // still editable, so the invoice can be keyed in by hand.
+            ApplyInvoice(new Invoice
+            {
+                InvoiceType = Enum.TryParse<InvoiceType>(SelectedInvoiceType, out var fallbackType)
+                    ? fallbackType : InvoiceType.Purchase,
+                ImagePath = item.SourcePath,
+                ContentHash = item.ContentHash,
+                EnhancedImagePath = item.EnhancedImagePath,
+                OcrImagePath = item.OcrImagePath
+            });
+
+            RawOcrText = null;
+            HasUnsavedChanges = false;
+
+            SetError(item.ErrorMessage ?? "فشل استخراج هذا الملف. يمكنك إدخاله يدويًا.");
+            RefreshBatchState();
+            return;
+        }
+
+        var invoice = ExtractionMapper.ToInvoice(
+            item.Result,
+            Enum.TryParse<InvoiceType>(SelectedInvoiceType, out var type)
+                ? type : InvoiceType.Purchase);
+
+        invoice.ImagePath = item.SourcePath;
+        invoice.ContentHash = item.ContentHash;
+        invoice.EnhancedImagePath = item.EnhancedImagePath;
+        invoice.OcrImagePath = item.OcrImagePath;
+
+        // As in ProcessFileCoreAsync: no stored snapshot yet, so the city follows the
+        // contact the merchant resolves to.
+        invoice.City = null;
+
+        ApplyInvoice(invoice, item.Result);
+
+        RawOcrText = item.Result.RawText;
+        HasUnsavedChanges = true;
+
+        Validate();
+        SetStatus($"الفاتورة {_batch.PositionLabel} — راجع واحفظ.");
+
+        RefreshBatchState();
+
+        await Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Empties the form once there is nothing left to review, so the last saved invoice
+    /// does not sit there looking like it still needs attention.
+    /// </summary>
+    private void ClearForm()
+    {
+        _isApplyingInvoice = true;
+        try
+        {
+            _editingInvoiceId = 0;
+            _contentHash = null;
+            _enhancedImagePath = null;
+            _ocrImagePath = null;
+
+            MerchantName = string.Empty;
+            InvoiceNumber = null;
+            City = null;
+            InvoiceDate = null;
+            TotalAmount = 0m;
+            SelectedCustomer = null;
+            ImagePath = null;
+            RawOcrText = null;
+
+            Items.Clear();
+            ValidationMessages.Clear();
+        }
+        finally
+        {
+            _isApplyingInvoice = false;
+        }
+
+        HasUnsavedChanges = false;
+
+        OnPropertyChanged(nameof(HasValidationMessages));
+        RefreshTotals();
+        RefreshImageAvailability();
+    }
+
+    [RelayCommand(CanExecute = nameof(CanMoveToNextBatchItem))]
+    private async Task NextBatchItemAsync() =>
+        await RunGuardedAsync(async () =>
+        {
+            if (_batch.MoveNext()) await ShowBatchItemCoreAsync();
+        }, "تعذّر الانتقال إلى الفاتورة التالية");
+
+    private bool CanMoveToNextBatchItem() => _batch.CanMoveNext;
+
+    [RelayCommand(CanExecute = nameof(CanMoveToPreviousBatchItem))]
+    private async Task PreviousBatchItemAsync() =>
+        await RunGuardedAsync(async () =>
+        {
+            if (_batch.MovePrevious()) await ShowBatchItemCoreAsync();
+        }, "تعذّر الانتقال إلى الفاتورة السابقة");
+
+    private bool CanMoveToPreviousBatchItem() => _batch.CanMovePrevious;
+
+    /// <summary>Discards the current batch item without saving and moves on.</summary>
+    [RelayCommand(CanExecute = nameof(CanSkipBatchItem))]
+    private async Task SkipBatchItemAsync() =>
+        await RunGuardedAsync(async () =>
+        {
+            await SkipCurrentAndAdvanceCoreAsync();
+        }, "تعذّر تخطي هذه الفاتورة");
+
+    private bool CanSkipBatchItem() => _batch.Current is not null;
+
+    private async Task SkipCurrentAndAdvanceCoreAsync()
+    {
+        if (_batch.Current is not { } item) return;
+
+        await _batch.SkipAsync(item.Index);
+
+        // Detach from the deleted files before advancing so nothing tries to re-read them.
+        _enhancedImagePath = null;
+        _ocrImagePath = null;
+
+        // Either way the form is rebuilt: MoveNext lands on the next unreviewed item, and
+        // when there is none, Current is the just-skipped item and the "batch complete"
+        // branch of ShowBatchItemCoreAsync takes over.
+        _batch.MoveNext();
+        await ShowBatchItemCoreAsync();
+    }
+
+    /// <summary>
+    /// Stops the batch after the file currently being extracted.
+    /// </summary>
+    /// <remarks>
+    /// Intentionally synchronous and unguarded. IsBusy stays true for the whole batch, so
+    /// a guarded command would refuse to run for exactly as long as there is something to
+    /// cancel — the one thing it exists to do.
+    /// </remarks>
+    [RelayCommand]
+    private void CancelBatch()
+    {
+        _batch.RequestCancel();
+        SetStatus("جارٍ إلغاء الدفعة بعد انتهاء الملف الحالي…");
+    }
+
+    /// <summary>Ends the batch and cleans up everything that was not saved.</summary>
+    [RelayCommand]
+    private async Task EndBatchAsync() =>
+        await RunGuardedAsync(async () =>
+        {
+            await _batch.ClearAsync();
+            _enhancedImagePath = null;
+            _ocrImagePath = null;
+            RefreshImageAvailability();
+            SetStatus("تم إنهاء الدفعة.");
+        }, "تعذّر إنهاء الدفعة");
+
+    private void ApplyInvoice(Invoice invoice, ExtractionResult? extraction = null)
+    {
+        _isApplyingInvoice = true;
+        try
+        {
+            MerchantName = invoice.MerchantName;
+            InvoiceNumber = invoice.InvoiceNumber;
+            InvoiceDate = invoice.InvoiceDate is { } date
+                ? new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue))
+                : null;
+            TotalAmount = invoice.TotalAmount;
+            SelectedInvoiceType = invoice.InvoiceType.ToString();
+            ImagePath = invoice.ImagePath ?? ImagePath;
+            _enhancedImagePath = invoice.EnhancedImagePath ?? _enhancedImagePath;
+            _ocrImagePath = invoice.OcrImagePath ?? _ocrImagePath;
+
+            ResolveCustomer(invoice);
+
+            // Deliberately after ResolveCustomer, which populates City from the chosen
+            // contact. A saved invoice carries its own City and that stored snapshot wins;
+            // a freshly extracted one arrives with City null, so the contact's value
+            // stands. Assigning before the resolve would let the contact overwrite the
+            // snapshot every time a saved invoice was reopened.
+            if (invoice.City is not null) City = invoice.City;
+
+            Items.Clear();
+            for (var i = 0; i < invoice.Items.Count; i++)
+            {
+                // Line confidence comes from the extraction when present; a hand-entered
+                // or previously-saved row is treated as fully confident.
+                var confidence = extraction is not null && i < extraction.LineItems.Count
+                    ? extraction.LineItems[i].ProductName?.Confidence ?? 1.0
+                    : 1.0;
+
+                AddRow(new InvoiceItemRowViewModel(invoice.Items[i], Products, confidence));
+            }
+
+            LinkProductsToCatalog();
+        }
+        finally
+        {
+            _isApplyingInvoice = false;
+        }
+
+        RefreshTotals();
+        RefreshImageAvailability();
+    }
+
+    /// <summary>
+    /// Re-checks which of the three renderings exist on disk and falls back to one that
+    /// does when the selected view has no file — otherwise the pane would go blank on an
+    /// invoice the service returned no diagnostic images for.
+    /// </summary>
+    private void RefreshImageAvailability()
+    {
+        HasOriginalImage = Exists(ImagePath);
+        HasEnhancedImage = Exists(_enhancedImagePath);
+        HasOcrImage = Exists(_ocrImagePath);
+
+        OnPropertyChanged(nameof(HasAnyViewableImage));
+
+        // Enhanced first: it is the default and the most legible for most scans.
+        if (CurrentImagePath is null)
+        {
+            if (HasEnhancedImage) SelectedImageView = InvoiceImageView.Enhanced;
+            else if (HasOriginalImage) SelectedImageView = InvoiceImageView.Original;
+            else if (HasOcrImage) SelectedImageView = InvoiceImageView.OcrInput;
+        }
+
+        OnPropertyChanged(nameof(CurrentImagePath));
+
+        static bool Exists(string? path) =>
+            !string.IsNullOrWhiteSpace(path) && File.Exists(path);
+    }
+
+    partial void OnSelectedImageViewChanged(InvoiceImageView value) =>
+        OnPropertyChanged(nameof(CurrentImagePath));
+
+    partial void OnImagePathChanged(string? value) =>
+        OnPropertyChanged(nameof(CurrentImagePath));
+
+    /// <summary>
+    /// Picks the contact this invoice belongs to: the record the service already matched
+    /// if it is still there, otherwise a local match on the merchant text.
+    /// </summary>
+    private void ResolveCustomer(Invoice invoice)
+    {
+        if (invoice.CustomerId is { } id)
+        {
+            var stored = Customers.FirstOrDefault(c => c.CustomerId == id);
+            if (stored is not null)
+            {
+                SelectedCustomer = stored;
+                return;
+            }
+        }
+
+        // Name and AliasName are equivalent here, exactly as on the service side, so a
+        // merchant printed under either spelling still lands on its contact.
+        SelectedCustomer = CatalogMatcher.FindCustomer(invoice.MerchantName, Customers)?.Customer;
+    }
+
+    /// <summary>
+    /// Resolves each unlinked row to a catalog product — exact name first, then a fuzzy
+    /// match. Rows that resolve to nothing stay unlinked and are reported by validation;
+    /// they are never silently saved as free text.
+    /// </summary>
+    private void LinkProductsToCatalog()
+    {
+        foreach (var row in Items)
+        {
+            if (row.IsProductLinked) continue;
+
+            var exact = Products.FirstOrDefault(p =>
+                string.Equals(p.Name, row.ProductName, StringComparison.OrdinalIgnoreCase));
+
+            var match = exact ?? CatalogMatcher.FindProduct(row.ProductName, Products)?.Product;
+            if (match is not null) row.LinkTo(match);
+        }
+
+        RefreshLinkState();
+    }
+
+    // ---- row management ---------------------------------------------------
+
+    private void AddRow(InvoiceItemRowViewModel row)
+    {
+        row.RowChanged += OnRowChanged;
+        Items.Add(row);
+    }
+
+    private void OnRowChanged(object? sender, EventArgs e)
+    {
+        HasUnsavedChanges = true;
+        RefreshTotals();
+
+        // Edits now land on the row ViewModel directly rather than through a grid
+        // cell-commit event, so re-validation hangs off the row itself. Validation is
+        // pure and synchronous, so running it per commit is cheap.
+        if (!_isApplyingInvoice) Validate();
+    }
+
+    private void OnItemsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        // Detach handlers from removed rows so they cannot keep the ViewModel alive or
+        // fire after removal.
+        if (e.OldItems is not null)
+        {
+            foreach (InvoiceItemRowViewModel row in e.OldItems)
+                row.RowChanged -= OnRowChanged;
+        }
+
+        RefreshTotals();
+    }
+
+    private void RefreshTotals()
+    {
+        OnPropertyChanged(nameof(ComputedTotal));
+        OnPropertyChanged(nameof(TotalsDisagree));
+        OnPropertyChanged(nameof(TotalComparisonText));
+        OnPropertyChanged(nameof(InvalidRowCount));
+        RefreshLinkState();
+    }
+
+    private void RefreshLinkState()
+    {
+        OnPropertyChanged(nameof(UnlinkedRowCount));
+        OnPropertyChanged(nameof(HasUnlinkedRows));
+        OnPropertyChanged(nameof(UnlinkedRowsText));
+        AddProductToCatalogCommand.NotifyCanExecuteChanged();
+    }
+
+    [RelayCommand]
+    private void AddItem()
+    {
+        AddRow(new InvoiceItemRowViewModel(
+            new InvoiceItem { ProductName = string.Empty }, Products));
+
+        HasUnsavedChanges = true;
+        RefreshLinkState();
+    }
+
+    /// <summary>
+    /// Registers a row's OCR text as a new catalog product and links the row to it.
+    /// This is the only route from "the invoice mentions something new" to a saved line:
+    /// the product enters the Products table first, then the row points at it.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanAddProductToCatalog))]
+    private async Task AddProductToCatalogAsync(InvoiceItemRowViewModel? row)
+    {
+        if (row is null || row.IsProductLinked) return;
+
+        var name = row.ProductName?.Trim();
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            SetError("لا يوجد اسم منتج في هذا الصف لإضافته.");
+            return;
+        }
+
+        await RunGuardedAsync(async () =>
+        {
+            // Products.Name is UNIQUE; an existing entry is linked rather than duplicated.
+            var product = await _products.FindByNameAsync(name);
+            if (product is null)
+            {
+                product = new Product { Name = name };
+                await _products.CreateAsync(product);
+            }
+
+            // Inserted rather than reloaded: refilling the collection would clear every
+            // other row's picker, since their selections point into this very list.
+            if (Products.All(p => p.ProductId != product.ProductId))
+                InsertProductSorted(product);
+
+            // Other rows naming the same thing get linked in the same pass.
+            LinkProductsToCatalog();
+
+            HasUnsavedChanges = true;
+            SetStatus($"تمت إضافة '{product.Name}' إلى المنتجات وربط البند به.");
+            Validate();
+        }, "تعذّرت إضافة المنتج إلى قائمة المنتجات");
+    }
+
+    private static bool CanAddProductToCatalog(InvoiceItemRowViewModel? row) =>
+        row is { IsProductLinked: false };
+
+    /// <summary>Keeps the picker list in the Name order the repository returns.</summary>
+    private void InsertProductSorted(Product product)
+    {
+        var index = 0;
+        while (index < Products.Count &&
+               string.Compare(Products[index].Name, product.Name,
+                   StringComparison.CurrentCultureIgnoreCase) < 0)
+        {
+            index++;
+        }
+
+        Products.Insert(index, product);
+    }
+
+    [RelayCommand]
+    private void RemoveItem(InvoiceItemRowViewModel? row)
+    {
+        if (row is null) return;
+        Items.Remove(row);
+        HasUnsavedChanges = true;
+    }
+
+    /// <summary>Sets the header total from the sum of the lines.</summary>
+    [RelayCommand]
+    private void UseComputedTotal()
+    {
+        TotalAmount = ComputedTotal;
+        HasUnsavedChanges = true;
+        Validate();
+    }
+
+    /// <summary>Fixes every arithmetic-mismatched row by accepting quantity × unit price.</summary>
+    [RelayCommand]
+    private void FixLineTotals()
+    {
+        var fixedCount = 0;
+        foreach (var row in Items.Where(r => !r.IsArithmeticValid).ToList())
+        {
+            row.AcceptComputedTotal();
+            fixedCount++;
+        }
+
+        if (fixedCount > 0)
+        {
+            HasUnsavedChanges = true;
+            SetStatus($"تمت إعادة حساب {fixedCount} إجمالي بند.");
+        }
+
+        Validate();
+    }
+
+    // ---- validation -------------------------------------------------------
+
+    [RelayCommand]
+    private void Validate()
+    {
+        // Strict mode: this is the screen where the contact and the product links can
+        // still be established, so it is the screen that insists on them.
+        var result = _validation.Validate(BuildInvoice(), requireCatalogLinks: true);
+
+        ValidationMessages.Clear();
+        foreach (var issue in result.Issues)
+            ValidationMessages.Add(issue.Message);
+
+        OnPropertyChanged(nameof(HasValidationMessages));
+        RefreshTotals();
+
+        if (result.IsClean)
+            SetStatus("اجتاز التحقق — لم يتم العثور على مشاكل.");
+        else if (result.HasErrors)
+            SetError($"تم العثور على {result.Issues.Count} مشكلة. الصفوف التي بها أخطاء مميزة.");
+        else
+            SetStatus($"{result.Issues.Count} تحذير. راجع قبل الحفظ.");
+    }
+
+    // ---- saving -----------------------------------------------------------
+
+    /// <summary>
+    /// Checks for duplicates and raises <see cref="DuplicatesDetected"/> if any are
+    /// found; otherwise saves immediately. The View decides whether to proceed.
+    /// </summary>
+    [RelayCommand]
+    private async Task SaveAsync()
+    {
+        await RunGuardedAsync(async () =>
+        {
+            var invoice = BuildInvoice();
+
+            var result = _validation.Validate(invoice, requireCatalogLinks: true);
+            ValidationMessages.Clear();
+            foreach (var issue in result.Issues)
+                ValidationMessages.Add(issue.Message);
+            OnPropertyChanged(nameof(HasValidationMessages));
+
+            if (result.HasErrors)
+            {
+                SetError("أصلح المشاكل المميزة قبل الحفظ.");
+                return;
+            }
+
+            var duplicates = await _duplicates.FindDuplicatesAsync(invoice);
+            if (duplicates.Count > 0)
+            {
+                // Hand the decision to the user rather than blocking: two identical
+                // receipts from the same shop on the same day are legitimate.
+                DuplicatesDetected?.Invoke(this, duplicates);
+                return;
+            }
+
+            await PersistAsync(invoice);
+        }, "فشل الحفظ");
+    }
+
+    /// <summary>Saves without re-checking duplicates. Called after the user confirms.</summary>
+    public async Task SaveConfirmedAsync()
+    {
+        await RunGuardedAsync(async () => await PersistAsync(BuildInvoice()),
+            "فشل الحفظ");
+    }
+
+    private async Task PersistAsync(Invoice invoice)
+    {
+        // Copy the source image into app storage so the record does not depend on a
+        // file the user might move or delete. The stem ties the imported original to the
+        // enhanced and OCR renderings already written next to it during processing.
+        if (!string.IsNullOrWhiteSpace(invoice.ImagePath) && _editingInvoiceId == 0)
+        {
+            var stem = _batch.Current?.Stem
+                ?? $"{DateTime.Now:yyyyMMdd_HHmmssfff}_000";
+
+            invoice.ImagePath = await ImportImageAsync(invoice.ImagePath!, stem)
+                ?? invoice.ImagePath;
+        }
+
+        if (_editingInvoiceId > 0)
+        {
+            invoice.InvoiceId = _editingInvoiceId;
+            await _invoices.UpdateAsync(invoice);
+        }
+        else
+        {
+            _editingInvoiceId = await _invoices.CreateAsync(invoice);
+        }
+
+        ImagePath = invoice.ImagePath;
+        HasUnsavedChanges = false;
+
+        SetStatus($"تم حفظ السجل رقم {_editingInvoiceId}.");
+        InvoiceSaved?.Invoke(this, _editingInvoiceId);
+
+        // Auto-advance through the batch. Deliberately the unguarded core: PersistAsync
+        // already runs inside SaveAsync's guard, so calling the guarded
+        // NextBatchItemCommand here would silently do nothing and strand the review.
+        if (_batch.Current is { } item && !_batch.IsProcessing)
+        {
+            _batch.MarkSaved(item.Index);
+
+            // MoveNext lands on the next unreviewed item; when there is none, Current is
+            // the item just marked saved and ShowBatchItemCoreAsync clears the form.
+            _batch.MoveNext();
+            await ShowBatchItemCoreAsync();
+        }
+    }
+
+    /// <summary>
+    /// Copies the user's file into app storage as <c>{stem}_orig{ext}</c>, beside the
+    /// <c>_enh</c> and <c>_ocr</c> renderings written during processing.
+    /// </summary>
+    /// <returns>
+    /// The destination path, or null when the source has gone. Null rather than a throw
+    /// because a batch may be saved minutes after import, by which time the user may have
+    /// moved or deleted the originals — that should cost the image, not the invoice.
+    /// </returns>
+    private async Task<string?> ImportImageAsync(string sourcePath, string stem)
+    {
+        if (!File.Exists(sourcePath)) return null;
+
+        var directory = await _settings.GetOrDefaultAsync(
+            SettingKeys.ImageStorageDirectory, AppPaths.DefaultImageDirectory);
+
+        Directory.CreateDirectory(directory);
+
+        var destination = Path.Combine(
+            directory, $"{stem}_orig{Path.GetExtension(sourcePath)}");
+
+        // Collision guard: two saves of the same batch item, or a stem reused after a
+        // clock change, must not overwrite an image another invoice row points at.
+        var attempt = 1;
+        while (File.Exists(destination))
+        {
+            destination = Path.Combine(
+                directory, $"{stem}_orig_{attempt++}{Path.GetExtension(sourcePath)}");
+        }
+
+        try
+        {
+            await Task.Run(() => File.Copy(sourcePath, destination, overwrite: false));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        return destination;
+    }
+
+    [RelayCommand]
+    private async Task ExportAsync(string? formatName)
+    {
+        var format = string.Equals(formatName, "csv", StringComparison.OrdinalIgnoreCase)
+            ? ExportFormat.Csv
+            : ExportFormat.Excel;
+
+        await RunGuardedAsync(async () =>
+        {
+            var directory = await _settings.GetOrDefaultAsync(
+                SettingKeys.ExportDirectory, AppPaths.DefaultExportDirectory);
+
+            var stem = string.IsNullOrWhiteSpace(InvoiceNumber)
+                ? $"invoice_{DateTime.Now:yyyyMMdd_HHmmss}"
+                : $"invoice_{SanitizeFileName(InvoiceNumber!)}";
+
+            var path = Path.Combine(directory, stem + _export.GetExtension(format));
+
+            await _export.ExportSingleInvoiceAsync(BuildInvoice(), path, format);
+            SetStatus($"تم التصدير إلى {path}");
+        }, "فشل التصدير");
+    }
+
+    private static string SanitizeFileName(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        return new string(value.Select(c => invalid.Contains(c) ? '_' : c).ToArray());
+    }
+
+    private Invoice BuildInvoice() => new()
+    {
+        InvoiceId = _editingInvoiceId,
+        InvoiceNumber = InvoiceNumber,
+
+        // The contact is the source of truth for the merchant name once one is chosen,
+        // so the text stored on the invoice always matches the Customers row it links to.
+        MerchantName = SelectedCustomer?.Name ?? MerchantName ?? string.Empty,
+        City = City,
+        InvoiceDate = InvoiceDate is { } date ? DateOnly.FromDateTime(date.Date) : null,
+        TotalAmount = TotalAmount,
+        InvoiceType = Enum.TryParse<InvoiceType>(SelectedInvoiceType, out var type)
+            ? type : InvoiceType.Purchase,
+        ImagePath = ImagePath,
+        EnhancedImagePath = _enhancedImagePath,
+        OcrImagePath = _ocrImagePath,
+        CustomerId = SelectedCustomer?.CustomerId,
+        ContentHash = _contentHash,
+        Items = Items.Select(i => i.ToModel()).ToList()
+    };
+
+    // ---- image viewer -----------------------------------------------------
+
+    [RelayCommand]
+    private void ZoomIn() => ZoomFactor = Math.Min(ZoomFactor * 1.25, 8.0);
+
+    [RelayCommand]
+    private void ZoomOut() => ZoomFactor = Math.Max(ZoomFactor / 1.25, 0.1);
+
+    [RelayCommand]
+    private void ZoomReset() => ZoomFactor = 1.0;
+
+    [RelayCommand]
+    private void ToggleFormPane() => IsFormPaneVisible = !IsFormPaneVisible;
+
+    [RelayCommand]
+    private void ToggleImagePane() => IsImagePaneVisible = !IsImagePaneVisible;
+
+    // ---- change tracking --------------------------------------------------
+
+    partial void OnMerchantNameChanged(string value) => HasUnsavedChanges = true;
+    partial void OnInvoiceNumberChanged(string? value) => HasUnsavedChanges = true;
+    partial void OnCityChanged(string? value) => HasUnsavedChanges = true;
+    partial void OnInvoiceDateChanged(DateTimeOffset? value) => HasUnsavedChanges = true;
+
+    partial void OnSelectedCustomerChanged(Customer? value)
+    {
+        HasUnsavedChanges = true;
+
+        // The invoice records the contact's canonical name, not whatever OCR read off
+        // the letterhead.
+        if (value is not null) MerchantName = value.Name;
+
+        // The city belongs to the contact, so picking one fills it in. Invoices.City is
+        // still written as a snapshot at save time — that is what the dashboard filters
+        // and the analytics read, and it must not shift when a contact is later edited.
+        City = value?.City;
+
+        OnPropertyChanged(nameof(IsCustomerLinked));
+    }
+
+    partial void OnSelectedInvoiceTypeChanged(string value)
+    {
+        OnPropertyChanged(nameof(CounterpartyLabel));
+        OnPropertyChanged(nameof(CounterpartyPlaceholder));
+
+        // ApplyInvoice sets the type before the line items are populated. Without this
+        // guard, the type change would validate a half-built form and print errors about
+        // rows that are about to be added.
+        if (_isApplyingInvoice) return;
+
+        HasUnsavedChanges = true;
+        Validate();
+    }
+
+    partial void OnTotalAmountChanged(decimal value)
+    {
+        HasUnsavedChanges = true;
+        RefreshTotals();
+    }
+}

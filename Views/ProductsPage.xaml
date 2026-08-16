@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="InvoiceDigitizationApp.Views.ProductsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:CommunityToolkit.WinUI.UI.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Padding="{StaticResource PagePadding}" RowSpacing="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="المنتجات" Style="{StaticResource PageTitleStyle}" />
+            <TextBlock Text="قائمة المنتجات الموحّدة التي تُطابَق نتائج التعرف الضوئي عليها."
+                       Style="{StaticResource PageSubtitleStyle}" />
+        </StackPanel>
+
+        <Grid Grid.Row="1" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <TextBox Grid.Column="0" PlaceholderText="ابحث في المنتجات…"
+                     Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <Button Grid.Column="1" Content="بحث" Command="{x:Bind ViewModel.SearchCommand}" />
+            <Button Grid.Column="2" Style="{StaticResource AccentButtonStyle}"
+                    Content="منتج جديد" Command="{x:Bind ViewModel.NewProductCommand}" />
+        </Grid>
+
+        <Grid Grid.Row="2" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Catalog grid -->
+            <Border Grid.Column="0" Style="{StaticResource CardStyle}" Padding="0">
+                <controls:DataGrid
+                    AutoGenerateColumns="False"
+                    IsReadOnly="True"
+                    GridLinesVisibility="Horizontal"
+                    SelectionMode="Single"
+                    ItemsSource="{x:Bind ViewModel.Products}"
+                    SelectedItem="{x:Bind ViewModel.SelectedProduct, Mode=TwoWay}">
+                    <controls:DataGrid.Columns>
+                        <controls:DataGridTextColumn Header="المعرّف" Width="70" Binding="{Binding ProductId}" />
+                        <controls:DataGridTextColumn Header="الاسم" Width="*" Binding="{Binding Name}" />
+                    </controls:DataGrid.Columns>
+                </controls:DataGrid>
+            </Border>
+
+            <!-- Editor -->
+            <Border Grid.Column="1" Style="{StaticResource CardStyle}" Width="300"
+                    VerticalAlignment="Top"
+                    Visibility="{x:Bind ViewModel.IsEditing, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="تفاصيل المنتج" Style="{StaticResource SectionHeaderStyle}" />
+
+                    <TextBox Header="الاسم"
+                             Text="{x:Bind ViewModel.EditName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                    <TextBlock TextWrapping="Wrap" Opacity="0.7" FontSize="12"
+                               Text="اسم المنتج هو ما تُطابَق عليه نتائج التعرف الضوئي، ولا يمكن اختيار منتج في شاشة التحقق ما لم يكن مسجّلًا هنا." />
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="حفظ" Style="{StaticResource AccentButtonStyle}"
+                                Command="{x:Bind ViewModel.SaveCommand}" />
+                        <Button Content="إلغاء" Command="{x:Bind ViewModel.CancelEditCommand}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <Grid Grid.Row="3" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Button Grid.Column="0" Content="تعديل" Command="{x:Bind ViewModel.EditProductCommand}" />
+            <Button Grid.Column="1" Content="حذف" Click="Delete_Click" />
+
+            <TextBlock Grid.Column="2" VerticalAlignment="Center" Margin="12,0,0,0"
+                       TextTrimming="CharacterEllipsis"
+                       Text="{x:Bind ViewModel.StatusMessage, Mode=OneWay}" />
+        </Grid>
+    </Grid>
+</Page>
