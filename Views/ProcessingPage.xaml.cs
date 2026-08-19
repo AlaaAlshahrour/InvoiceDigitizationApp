@@ -18,6 +18,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Xaml.Shapes;
 using Microsoft.UI.Xaml.Navigation;
 using Windows.Foundation;
 using Windows.Storage.Streams;
@@ -139,6 +140,223 @@ public sealed partial class ProcessingPage : Page
         // repaint the pane through one path.
         else if (e.PropertyName == nameof(ViewModel.CurrentImagePath))
             await LoadImageAsync(ViewModel.CurrentImagePath);
+
+        else if (e.PropertyName is nameof(ViewModel.FieldRegions)
+                               or nameof(ViewModel.ShowFieldRegions))
+            DrawFieldRegions();
+
+        // Redrawn rather than re-styled: the highlight is a brush and stroke difference
+        // on rectangles the layer already holds, and rebuilding a few dozen of them is
+        // cheaper to reason about than tracking which one was previously selected.
+        else if (e.PropertyName == nameof(ViewModel.SelectedRegion))
+        {
+            DrawFieldRegions();
+            ZoomToSelectedRegion();
+        }
+    }
+
+    // ---- field regions ----------------------------------------------------
+
+    /// <summary>
+    /// Rectangles currently on the overlay, keyed by the region they were drawn for, so
+    /// the zoom can find the one it needs to bring into view without a visual-tree walk.
+    /// </summary>
+    private readonly Dictionary<FieldRegion, Rectangle> _regionShapes = new();
+
+    /// <summary>
+    /// Repaints the box overlay.
+    /// </summary>
+    /// <remarks>
+    /// Boxes arrive in the corrected page's coordinate space — <c>source.width</c> ×
+    /// <c>source.height</c> — and the pane renders that page scaled to fit. One scale
+    /// factor per axis converts between them; they are equal under a Uniform stretch, but
+    /// computing both keeps this correct if the stretch ever changes.
+    ///
+    /// The Canvas is sized to the Image's *rendered* size, not to the page's pixel size,
+    /// which is why this runs from SizeChanged as well as from the ViewModel: a pane
+    /// resize changes the rendered size without changing a single box.
+    /// </remarks>
+    private void DrawFieldRegions()
+    {
+        RegionLayer.Children.Clear();
+        _regionShapes.Clear();
+
+        var map = ViewModel.FieldRegions;
+
+        if (!ViewModel.ShowFieldRegions || !map.HasRegions) return;
+
+        // ActualWidth is zero until the image has been measured; SizeChanged calls back
+        // in once it has, so there is nothing to do on this pass.
+        var renderedWidth = InvoiceImage.ActualWidth;
+        var renderedHeight = InvoiceImage.ActualHeight;
+        if (renderedWidth <= 0 || renderedHeight <= 0) return;
+
+        RegionLayer.Width = renderedWidth;
+        RegionLayer.Height = renderedHeight;
+
+        var scaleX = renderedWidth / map.PageWidth;
+        var scaleY = renderedHeight / map.PageHeight;
+
+        foreach (var region in map.Regions)
+        {
+            var selected = ReferenceEquals(region, ViewModel.SelectedRegion);
+
+            var shape = new Rectangle
+            {
+                Width = Math.Max(1, region.Width * scaleX),
+                Height = Math.Max(1, region.Height * scaleY),
+
+                // The selected box is filled as well as outlined; the rest are outlines
+                // only, or they would obscure the very text the user is checking.
+                Fill = selected
+                    ? new SolidColorBrush(Color.FromArgb(56, 47, 111, 228))
+                    : new SolidColorBrush(Colors.Transparent),
+                Stroke = new SolidColorBrush(selected
+                    ? Color.FromArgb(255, 47, 111, 228)
+                    : Color.FromArgb(150, 217, 164, 65)),
+                StrokeThickness = selected ? 2.5 : 1.2
+            };
+
+            ToolTipService.SetToolTip(shape, region.Label);
+
+            Canvas.SetLeft(shape, region.X * scaleX);
+            Canvas.SetTop(shape, region.Y * scaleY);
+
+            RegionLayer.Children.Add(shape);
+            _regionShapes[region] = shape;
+        }
+    }
+
+    private void InvoiceImage_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        DrawFieldRegions();
+
+    // ---- form → image -----------------------------------------------------
+
+    // The field a control stands for travels in its Tag, parsed back to the enum here.
+    // A Tag rather than a handler per field: nine fields would otherwise be nine
+    // near-identical methods, and the grid's cells are inside a DataTemplate where each
+    // one would need the row looked up anyway.
+
+    private void HeaderField_Focused(object sender, RoutedEventArgs e) =>
+        SelectRegionFrom(sender, rowIndex: -1);
+
+    private void HeaderField_Tapped(object sender, TappedRoutedEventArgs e) =>
+        SelectRegionFrom(sender, rowIndex: -1);
+
+    /// <summary>
+    /// Selects the region for a cell inside the items grid, resolving which line it
+    /// belongs to from the row ViewModel the template is bound to.
+    /// </summary>
+    private void RowField_Focused(object sender, RoutedEventArgs e) =>
+        SelectRegionFrom(sender, RowIndexOf(sender));
+
+    private void RowField_Tapped(object sender, TappedRoutedEventArgs e) =>
+        SelectRegionFrom(sender, RowIndexOf(sender));
+
+    private void SelectRegionFrom(object sender, int rowIndex)
+    {
+        if (sender is not FrameworkElement { Tag: string tag }) return;
+        if (!Enum.TryParse<FieldKind>(tag, out var kind)) return;
+
+        // Only meaningful for a row cell that could not be tied back to a line; a header
+        // field passes -1 deliberately.
+        if (rowIndex == int.MinValue) return;
+
+        ViewModel.SelectRegion(kind, rowIndex);
+    }
+
+    /// <summary>
+    /// The index of the line item a templated cell belongs to, or
+    /// <see cref="int.MinValue"/> when it cannot be resolved.
+    /// </summary>
+    /// <remarks>
+    /// Taken from the row ViewModel's position in the Items collection rather than from
+    /// the DataGrid's own row index: the grid's index follows its display order, and the
+    /// boxes are keyed by the order the service reported the products in. They agree
+    /// today — nothing sorts this grid — but the collection is the one that is guaranteed
+    /// to, because it is the same list ApplyInvoice built the regions alongside.
+    /// </remarks>
+    private int RowIndexOf(object sender)
+    {
+        if (sender is not FrameworkElement { DataContext: InvoiceItemRowViewModel row })
+            return int.MinValue;
+
+        var index = ViewModel.Items.IndexOf(row);
+        return index >= 0 ? index : int.MinValue;
+    }
+
+    /// <summary>
+    /// Zooms and scrolls the pane so the selected box fits inside it, with a margin.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The box's position is taken from the overlay rectangle rather than recomputed from
+    /// the page coordinates: the rectangle has already been through the same scaling the
+    /// image was, so reading it back cannot drift from what the user can see.
+    /// </para>
+    /// <para>
+    /// The rectangle's position is read from the Canvas attached properties it was drawn
+    /// with, then offset by where the image sits inside the scroller's content. Both are
+    /// *unzoomed* content coordinates — the ScrollViewer's zoom is applied above them, so
+    /// neither is affected by the current zoom factor, and the conversion to a scroll
+    /// offset is one multiply by the target zoom. Reading the position back through
+    /// <c>TransformToVisual</c> instead would have folded the live zoom in and needed it
+    /// divided straight back out.
+    /// </para>
+    /// <para>
+    /// The image is centred in its cell, so when the content is narrower than the viewport
+    /// there is a gap to its left that the box's own coordinates know nothing about. That
+    /// gap is exactly what <c>ImageSurface</c>-relative positioning accounts for.
+    /// </para>
+    /// </remarks>
+    private void ZoomToSelectedRegion()
+    {
+        if (ViewModel.SelectedRegion is not { } region) return;
+        if (!_regionShapes.TryGetValue(region, out var shape)) return;
+
+        var viewportWidth = ImageScroller.ViewportWidth;
+        var viewportHeight = ImageScroller.ViewportHeight;
+        if (viewportWidth <= 0 || viewportHeight <= 0) return;
+
+        var boxWidth = shape.Width;
+        var boxHeight = shape.Height;
+        if (boxWidth <= 0 || boxHeight <= 0) return;
+
+        // A quarter of the viewport left over, so the box sits in context rather than
+        // filling the pane edge to edge — the surrounding text is usually what tells the
+        // user whether the box is on the right cell.
+        const double Fill = 0.75;
+
+        var target = Math.Clamp(
+            Math.Min(viewportWidth * Fill / boxWidth, viewportHeight * Fill / boxHeight),
+            ImageScroller.MinZoomFactor,
+            ImageScroller.MaxZoomFactor);
+
+        // Unzoomed content coordinates: where the box's centre sits on the laid-out
+        // surface. RegionLayer and InvoiceImage share a cell in ImageSurface and are the
+        // same size, so a Canvas coordinate is already an ImageSurface coordinate.
+        var centreX = Canvas.GetLeft(shape) + boxWidth / 2;
+        var centreY = Canvas.GetTop(shape) + boxHeight / 2;
+
+        // ImageSurface is centred inside the scroller's content when the image is smaller
+        // than the pane; that leading gap is part of the offset and is not in the box's
+        // own coordinates.
+        if (ImageScroller.Content is UIElement content && content != ImageSurface)
+        {
+            var origin = ImageSurface
+                .TransformToVisual(content)
+                .TransformPoint(new Point(0, 0));
+
+            centreX += origin.X;
+            centreY += origin.Y;
+        }
+
+        // Scroll offsets are in zoomed pixels; the coordinates above are not.
+        ImageScroller.ChangeView(
+            centreX * target - viewportWidth / 2,
+            centreY * target - viewportHeight / 2,
+            (float)target,
+            disableAnimation: false);
     }
 
     // ---- rendering picker -------------------------------------------------

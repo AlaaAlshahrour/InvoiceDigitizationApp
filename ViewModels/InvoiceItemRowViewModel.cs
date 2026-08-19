@@ -50,6 +50,15 @@ public partial class InvoiceItemRowViewModel : ObservableObject
         // A row arriving with an id is already catalog-backed; select it so the picker
         // opens on the right entry instead of looking empty.
         _selectedProduct = FindInCatalog(item.ProductId, item.ProductName);
+
+        // Nothing resolved the row, but the service still ranked the catalog against
+        // what it read. Point the picker at the best of those even when it scored under
+        // the review threshold: a weak match is a far better starting point than an
+        // empty box, and the row stays flagged for review either way — RequiresManualReview
+        // is unchanged by this, the amber highlight still shows, and the score sits in the
+        // picker's own text so the user can see exactly how much to trust it.
+        _selectedProduct ??= ProductChoices.FirstOrDefault(choice => choice.IsSuggestion)?.Product;
+
         if (_selectedProduct is not null)
         {
             _productId = _selectedProduct.ProductId;
@@ -88,16 +97,43 @@ public partial class InvoiceItemRowViewModel : ObservableObject
     /// </summary>
     public void RefreshChoices() => RebuildChoices();
 
+    /// <summary>
+    /// Whether this row's picker lists the whole Products table or only the ranked
+    /// matches. Off by default — see <see cref="MatchChoiceBuilder"/> for why the full
+    /// catalog in every row is what made the picker slow to open.
+    /// </summary>
+    [ObservableProperty] private bool _showAllProducts;
+
+    partial void OnShowAllProductsChanged(bool value)
+    {
+        RebuildChoices();
+        OnPropertyChanged(nameof(ProductScopeLabel));
+    }
+
+    /// <summary>The "show all" toggle's caption, naming what it will switch to.</summary>
+    public string ProductScopeLabel =>
+        ShowAllProducts ? "الأقرب فقط" : "كل المنتجات";
+
     private void RebuildChoices()
     {
         var previous = SelectedProduct;
 
         ProductChoices.Clear();
 
-        foreach (var choice in MatchChoiceBuilder.ForProducts(ProductCatalog, _results))
+        // Only the ranked matches unless the user asked for the whole catalog. The
+        // selected product is force-included below, so narrowing the list can never
+        // orphan a selection the user already made.
+        foreach (var choice in MatchChoiceBuilder.ForProducts(
+                     ProductCatalog, _results, includeCatalog: ShowAllProducts))
         {
             ProductChoices.Add(choice);
         }
+
+        // A product chosen from the full list stays in the short list afterwards.
+        // Without this, switching "show all" back off would drop the very entry the row
+        // is set to and read as the row clearing itself.
+        if (previous is not null && FindChoice(previous) is null)
+            ProductChoices.Add(new ProductChoice(previous));
 
         // The entry the picker pointed at is gone; point it at the equivalent new one so
         // a rebuild does not look like the user clearing the row.

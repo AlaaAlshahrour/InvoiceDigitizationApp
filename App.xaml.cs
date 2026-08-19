@@ -120,9 +120,20 @@ public partial class App : Application
 
         // OCR on a large scan can legitimately take a while; the default 100s would
         // abort a valid request on a slower machine.
+        //
+        // Timeout.InfiniteTimeSpan, not a number. The layout-driven flow crops and reads
+        // every cell of a handwritten invoice through a VLM on the CPU, and the first
+        // request of a session also pays for loading ~1.7 GB of weights — a
+        // wall-clock cost that depends on the machine and on the invoice, and that any
+        // fixed ceiling eventually guesses too low. When it did, HttpClient cancelled a
+        // request the service went on to complete: the app reported "فشلت العملية" for
+        // an invoice that had in fact been extracted, which is the worst of both
+        // outcomes. Cancellation is driven by the CancellationToken the caller passes
+        // instead — the batch's cancel button — so the user is still the one who decides
+        // when an extraction has gone on too long, and can see the progress it made.
         services.AddHttpClient<IAiServiceClient, HttpAiServiceClient>(client =>
         {
-            client.Timeout = TimeSpan.FromMinutes(5);
+            client.Timeout = Timeout.InfiniteTimeSpan;
         });
 
         // The batch service is a singleton but the client above is transient over a

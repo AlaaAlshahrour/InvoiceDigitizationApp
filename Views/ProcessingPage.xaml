@@ -223,6 +223,7 @@
                         -->
                         <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2">
                             <ComboBox HorizontalAlignment="Stretch"
+                                      Tag="MerchantName" GotFocus="HeaderField_Focused"
                                       Header="{x:Bind ViewModel.CounterpartyLabel, Mode=OneWay}"
                                       PlaceholderText="{x:Bind ViewModel.CounterpartyPlaceholder, Mode=OneWay}"
                                       DisplayMemberPath="DisplayName"
@@ -243,6 +244,7 @@
 
                         <!-- The number printed on the invoice itself, not the database id. -->
                         <TextBox Grid.Row="0" Grid.Column="1" Header="رقم الفاتورة المطبوع"
+                                 Tag="InvoiceNumber" GotFocus="HeaderField_Focused"
                                  Text="{x:Bind ViewModel.InvoiceNumber, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
                         <!--
@@ -252,12 +254,14 @@
                           whose city disagrees with the record it points at.
                         -->
                         <TextBox Grid.Row="1" Grid.Column="0" Header="المدينة"
+                                 Tag="City" GotFocus="HeaderField_Focused" Tapped="HeaderField_Tapped"
                                  IsReadOnly="True" Opacity="0.75"
                                  PlaceholderText="—"
                                  ToolTipService.ToolTip="تُؤخذ من سجل العميل/المورد ولا تُحرَّر هنا"
                                  Text="{x:Bind ViewModel.City, Mode=OneWay}" />
 
                         <DatePicker Grid.Row="1" Grid.Column="1" Header="تاريخ الفاتورة"
+                                    Tag="InvoiceDate" GotFocus="HeaderField_Focused"
                                     HorizontalAlignment="Stretch"
                                     SelectedDate="{x:Bind ViewModel.InvoiceDate, Mode=TwoWay}" />
 
@@ -279,6 +283,7 @@
                             </Grid.ColumnDefinitions>
 
                             <TextBox Grid.Column="0" Header="إجمالي الفاتورة"
+                                     Tag="TotalAmount" GotFocus="HeaderField_Focused"
                                      Style="{StaticResource NumericBoxStyle}"
                                      Text="{x:Bind ViewModel.TotalAmount, Mode=TwoWay, Converter={StaticResource Money}, UpdateSourceTrigger=PropertyChanged}" />
 
@@ -327,12 +332,34 @@
                             <controls:DataGridTemplateColumn Header="المنتج" Width="2*">
                                 <controls:DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate x:DataType="vm:InvoiceItemRowViewModel">
-                                        <ComboBox Margin="4,2"
-                                                  HorizontalAlignment="Stretch"
-                                                  PlaceholderText="اختر منتجًا"
-                                                  DisplayMemberPath="DisplayName"
-                                                  ItemsSource="{x:Bind ProductChoices}"
-                                                  SelectedItem="{x:Bind SelectedChoice, Mode=TwoWay}" />
+                                        <Grid ColumnSpacing="4">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+
+                                            <ComboBox Grid.Column="0" Margin="4,2"
+                                                      HorizontalAlignment="Stretch"
+                                                      Tag="ProductName" GotFocus="RowField_Focused"
+                                                      PlaceholderText="اختر منتجًا"
+                                                      DisplayMemberPath="DisplayName"
+                                                      ItemsSource="{x:Bind ProductChoices}"
+                                                      SelectedItem="{x:Bind SelectedChoice, Mode=TwoWay}" />
+
+                                            <!--
+                                              The escape hatch from the short list. The
+                                              picker holds only the ranked matches, so a
+                                              product the service did not rank — a line it
+                                              read badly, a product added since — is
+                                              reached by turning this on for that one row.
+                                            -->
+                                            <ToggleButton Grid.Column="1" Margin="0,2"
+                                                          MinWidth="0" Padding="8,4"
+                                                          FontSize="11"
+                                                          ToolTipService.ToolTip="التبديل بين أقرب المطابقات وكل المنتجات"
+                                                          Content="{x:Bind ProductScopeLabel, Mode=OneWay}"
+                                                          IsChecked="{x:Bind ShowAllProducts, Mode=TwoWay}" />
+                                        </Grid>
                                     </DataTemplate>
                                 </controls:DataGridTemplateColumn.CellTemplate>
                             </controls:DataGridTemplateColumn>
@@ -341,7 +368,9 @@
                             <controls:DataGridTemplateColumn Header="نص الفاتورة" Width="140">
                                 <controls:DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate x:DataType="vm:InvoiceItemRowViewModel">
-                                        <StackPanel Margin="8,0" VerticalAlignment="Center">
+                                        <StackPanel Margin="8,0" VerticalAlignment="Center"
+                                                    Tag="ProductName" Tapped="RowField_Tapped"
+                                                    Background="Transparent">
                                             <TextBlock Text="{x:Bind DetectedProductName}"
                                                        TextTrimming="CharacterEllipsis"
                                                        ToolTipService.ToolTip="{x:Bind DetectedProductName}" />
@@ -358,6 +387,7 @@
                                 <controls:DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate x:DataType="vm:InvoiceItemRowViewModel">
                                         <NumberBox Margin="4,2" Minimum="0"
+                                                   Tag="Quantity" GotFocus="RowField_Focused"
                                                    SpinButtonPlacementMode="Hidden"
                                                    FlowDirection="LeftToRight"
                                                    Value="{x:Bind Quantity, Mode=TwoWay, Converter={StaticResource DecimalToDouble}}" />
@@ -369,6 +399,7 @@
                                 <controls:DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate x:DataType="vm:InvoiceItemRowViewModel">
                                         <NumberBox Margin="4,2" Minimum="0"
+                                                   Tag="UnitPrice" GotFocus="RowField_Focused"
                                                    SpinButtonPlacementMode="Hidden"
                                                    FlowDirection="LeftToRight"
                                                    Value="{x:Bind UnitPrice, Mode=TwoWay, Converter={StaticResource DecimalToDouble}}" />
@@ -384,6 +415,7 @@
                                 <controls:DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate x:DataType="vm:InvoiceItemRowViewModel">
                                         <NumberBox Margin="4,2"
+                                                   Tag="LineTotal" GotFocus="RowField_Focused"
                                                    SpinButtonPlacementMode="Hidden"
                                                    FlowDirection="LeftToRight"
                                                    Value="{x:Bind TotalPrice, Mode=TwoWay, Converter={StaticResource DecimalToDouble}}" />
@@ -542,6 +574,21 @@
                             <FontIcon Glyph="&#xE8A3;" FontSize="14" />
                         </Button>
                         <Button Command="{x:Bind ViewModel.ZoomResetCommand}" Content="ملاءمة" />
+
+                        <Border Width="1" Margin="4,2"
+                                Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+                        <!--
+                          Drawn only when there is something to draw: a saved invoice
+                          reopened carries no extraction, so the boxes would be an empty
+                          promise. Disabled rather than hidden, for the same reason the
+                          rendering picker keeps all three buttons in place.
+                        -->
+                        <CheckBox Content="إظهار الحقول"
+                                  MinWidth="0" VerticalAlignment="Center"
+                                  ToolTipService.ToolTip="ارسم مربعًا حول كل حقل قرأه المحرك على الصورة"
+                                  IsEnabled="{x:Bind ViewModel.HasFieldRegions, Mode=OneWay}"
+                                  IsChecked="{x:Bind ViewModel.ShowFieldRegions, Mode=TwoWay}" />
                         <TextBlock VerticalAlignment="Center" Margin="8,0,0,0" Opacity="0.7"
                                    Text="{x:Bind ZoomLabel(ViewModel.ZoomFactor), Mode=OneWay}" />
                     </StackPanel>
@@ -570,7 +617,29 @@
                         ViewChanged="ImageScroller_ViewChanged"
                         Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
 
-                        <Image x:Name="InvoiceImage" Stretch="Uniform" />
+                        <!--
+                          The image and the box overlay share one cell, so the Canvas is
+                          laid out at exactly the Image's rendered size and a box drawn in
+                          it lands on the pixels it describes. Both scale together under
+                          the ScrollViewer's zoom, which is what keeps a highlight glued to
+                          its cell while the user pans.
+
+                          SizeChanged is what triggers a redraw: the Uniform stretch means
+                          the rendered size depends on the pane's aspect ratio, not just on
+                          the zoom, so it is the only signal that catches every case.
+                        -->
+                        <Grid x:Name="ImageSurface" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <Image x:Name="InvoiceImage" Stretch="Uniform"
+                                   SizeChanged="InvoiceImage_SizeChanged" />
+
+                            <!--
+                              IsHitTestVisible is off so the pan and marquee drags below
+                              still reach the ScrollViewer. Selection is driven from the
+                              form side — clicking a cell highlights its box — which is the
+                              direction the feature was asked for.
+                            -->
+                            <Canvas x:Name="RegionLayer" IsHitTestVisible="False" />
+                        </Grid>
                     </ScrollViewer>
 
                     <!--

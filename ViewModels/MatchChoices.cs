@@ -57,10 +57,11 @@ public sealed class ProductChoice
 }
 
 /// <summary>
-/// Builds the ordered picker lists: the service's ranked results first, then the rest of
-/// the catalog in its own order.
+/// Builds the ordered picker lists: the service's ranked results first, then — only when
+/// asked for — the rest of the catalog in its own order.
 /// </summary>
 /// <remarks>
+/// <para>
 /// There is no local fallback matcher any more. The app used to re-rank the catalog itself
 /// when the service returned nothing — with its own copies of the normalization and
 /// similarity rules, which could and did drift from the service's. Two implementations of
@@ -68,6 +69,18 @@ public sealed class ProductChoice
 /// it, and the disagreement was invisible until a merchant the service had matched came
 /// back unmatched in the app. When there are no results, the picker is simply the catalog,
 /// which is honest about the app having nothing to suggest.
+/// </para>
+/// <para>
+/// <b>The full catalog is no longer the default.</b> A line-items grid builds one picker
+/// per row, and each picker used to materialize a <see cref="ProductChoice"/> for every
+/// product in the table — so an invoice with 20 lines against a catalog of a few thousand
+/// built tens of thousands of objects, then handed each ComboBox a list that long to
+/// realize and lay out on first open. That is what made a click on "اختر المنتج" take
+/// several seconds and appear to need pressing more than once: the first click *had*
+/// opened the drop-down, it was simply still building it. Showing the ranked matches
+/// alone keeps every list short, which is also the list the user actually wants — the
+/// whole point of asking the service for ranked results.
+/// </para>
 /// </remarks>
 public static class MatchChoiceBuilder
 {
@@ -76,38 +89,62 @@ public static class MatchChoiceBuilder
 
     /// <summary>
     /// Suggestions first, in the order the service ranked them, then every other contact
-    /// in catalog order.
+    /// in catalog order when <paramref name="includeCatalog"/> is set.
     /// </summary>
     public static IReadOnlyList<CustomerChoice> ForCustomers(
         IEnumerable<Customer> catalog,
-        IReadOnlyList<MatchResult>? results)
+        IReadOnlyList<MatchResult>? results,
+        bool includeCatalog = true)
     {
         var customers = catalog.ToList();
         var ranked = Resolve(customers, results, c => c.CustomerId, c => c.Name);
         var suggested = ranked.Select(entry => entry.Item1.CustomerId).ToHashSet();
 
-        return ranked
+        var choices = ranked
             .Select(entry => new CustomerChoice(entry.Item1, entry.Item2))
-            .Concat(customers
-                .Where(customer => !suggested.Contains(customer.CustomerId))
-                .Select(customer => new CustomerChoice(customer)))
             .ToList();
+
+        // With nothing ranked there is no short list to offer, so the catalog stands in
+        // regardless — an empty picker would leave the user no way to link the invoice.
+        if (includeCatalog || choices.Count == 0)
+        {
+            choices.AddRange(customers
+                .Where(customer => !suggested.Contains(customer.CustomerId))
+                .Select(customer => new CustomerChoice(customer)));
+        }
+
+        return choices;
     }
 
+    /// <summary>
+    /// The row picker's entries.
+    /// </summary>
+    /// <param name="includeCatalog">
+    /// False for the line-items grid, where only the ranked matches are shown and the
+    /// full catalog is reached through the row's own "show all" toggle. See the type's
+    /// remarks for why this is not the default any more.
+    /// </param>
     public static IReadOnlyList<ProductChoice> ForProducts(
         IEnumerable<Product> catalog,
-        IReadOnlyList<MatchResult>? results)
+        IReadOnlyList<MatchResult>? results,
+        bool includeCatalog = true)
     {
         var products = catalog.ToList();
         var ranked = Resolve(products, results, p => p.ProductId, p => p.Name);
         var suggested = ranked.Select(entry => entry.Item1.ProductId).ToHashSet();
 
-        return ranked
+        var choices = ranked
             .Select(entry => new ProductChoice(entry.Item1, entry.Item2))
-            .Concat(products
-                .Where(product => !suggested.Contains(product.ProductId))
-                .Select(product => new ProductChoice(product)))
             .ToList();
+
+        if (includeCatalog || choices.Count == 0)
+        {
+            choices.AddRange(products
+                .Where(product => !suggested.Contains(product.ProductId))
+                .Select(product => new ProductChoice(product)));
+        }
+
+        return choices;
     }
 
     /// <summary>

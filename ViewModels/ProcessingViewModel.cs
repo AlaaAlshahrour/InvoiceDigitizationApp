@@ -185,6 +185,51 @@ public partial class ProcessingViewModel : ViewModelBase
         _ => HasOriginalImage ? ImagePath : null
     };
 
+    // ---- field regions ----------------------------------------------------
+
+    /// <summary>
+    /// Every bounding box the current extraction reported, in the corrected page's
+    /// coordinate space. <see cref="FieldRegionMap.Empty"/> for a hand-typed or
+    /// previously-saved invoice, which has no extraction behind it and so nothing to draw.
+    /// </summary>
+    /// <remarks>
+    /// Boxes are not persisted with the invoice — they describe one reading of one image,
+    /// not the record — so reopening a saved invoice shows the image without an overlay.
+    /// </remarks>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasFieldRegions))]
+    private FieldRegionMap _fieldRegions = FieldRegionMap.Empty;
+
+    public bool HasFieldRegions => FieldRegions.HasRegions;
+
+    /// <summary>
+    /// The cell the user last clicked in the form, or null. The overlay highlights this
+    /// box and the image pane zooms to fit it.
+    /// </summary>
+    [ObservableProperty] private FieldRegion? _selectedRegion;
+
+    /// <summary>
+    /// Whether the boxes are drawn at all. On by default: seeing what the engine read
+    /// each value from is the fastest way to check it, which is the whole job of this
+    /// screen.
+    /// </summary>
+    [ObservableProperty] private bool _showFieldRegions = true;
+
+    /// <summary>
+    /// Selects the region for a cell, if the extraction reported one. Called from the
+    /// View when a field or a grid cell is clicked; a field the service placed no box on
+    /// simply clears the selection rather than leaving the previous box highlighted, which
+    /// would point the user at the wrong cell.
+    /// </summary>
+    public void SelectRegion(FieldKind kind, int rowIndex = -1)
+    {
+        SelectedRegion = FieldRegions.Regions
+            .FirstOrDefault(region => region.Matches(kind, rowIndex));
+    }
+
+    /// <summary>Clears the highlight, leaving the boxes drawn.</summary>
+    public void ClearRegionSelection() => SelectedRegion = null;
+
     // ---- pane layout ------------------------------------------------------
 
     [ObservableProperty] private bool _isFormPaneVisible = true;
@@ -519,15 +564,33 @@ public partial class ProcessingViewModel : ViewModelBase
         {
             await LoadCatalogsAsync();
 
-            var progress = new Progress<BatchProgress>(p =>
-                SetStatus($"جارٍ معالجة {p.CompletedCount} من {p.TotalCount}… ({p.CurrentFileName})"));
+            // Guards the status line against Progress<T>'s asynchrony. Progress posts
+            // each report to the UI thread through the synchronization context, so a
+            // report queued for the last file can still be delivered *after* the batch
+            // has finished and ShowBatchItemCoreAsync has written the real status —
+            // overwriting "extracted 7 items, review and save" with a stale
+            // "processing 1 of 3…" that then sat there looking like a hang.
+            var reportProgress = true;
 
-            await _batch.StartAsync(
-                paths,
-                BuildExtractionOptions(),
-                await _pipeline.GetAsync(ct),
-                progress,
-                ct);
+            var progress = new Progress<BatchProgress>(p =>
+            {
+                if (!reportProgress) return;
+                SetStatus($"جارٍ معالجة {p.CompletedCount} من {p.TotalCount}… ({p.CurrentFileName})");
+            });
+
+            try
+            {
+                await _batch.StartAsync(
+                    paths,
+                    BuildExtractionOptions(),
+                    await _pipeline.GetAsync(ct),
+                    progress,
+                    ct);
+            }
+            finally
+            {
+                reportProgress = false;
+            }
 
             if (_batch.TotalCount == 0)
             {
@@ -535,11 +598,25 @@ public partial class ProcessingViewModel : ViewModelBase
                 return;
             }
 
+            // Last, so the item actually on screen has the final word on the status
+            // line. It reports its own success or its own failure; the batch-wide
+            // summary below only speaks when it has something to add that the current
+            // item does not already say.
             await ShowBatchItemCoreAsync();
 
             var failed = _batch.Items.Count(i => i.State == BatchItemState.Failed);
-            if (failed > 0)
-                SetError($"تمت معالجة {_batch.TotalCount} ملف، وفشل {failed} منها. راجع الباقي.");
+
+            // Only when the file being shown is *not* itself the failure. Reporting
+            // "1 of 1 failed" over a successfully extracted invoice is what made a
+            // working extraction look broken: the user saw the red banner, and the form
+            // underneath it was correctly filled in the whole time. ShowBatchItemCoreAsync
+            // has already set an error for a current item that did fail.
+            if (failed > 0 && _batch.Current?.State != BatchItemState.Failed)
+            {
+                SetError(
+                    $"تمت معالجة {_batch.TotalCount} ملف، وفشل {failed} منها. " +
+                    "الفاتورة المعروضة سليمة — استخدم 'التالي' لمراجعة الباقي.");
+            }
         }, "فشلت معالجة الدفعة");
     }
 
@@ -657,6 +734,9 @@ public partial class ProcessingViewModel : ViewModelBase
 
             Items.Clear();
             ValidationMessages.Clear();
+
+            FieldRegions = FieldRegionMap.Empty;
+            SelectedRegion = null;
         }
         finally
         {
@@ -747,6 +827,12 @@ public partial class ProcessingViewModel : ViewModelBase
         _isApplyingInvoice = true;
         try
         {
+            // Derived from the extraction being applied, so the overlay can never show
+            // boxes belonging to a previously reviewed invoice. A null extraction — a
+            // saved record reopened, or a file the user is keying in by hand — clears it.
+            FieldRegions = FieldRegionMap.From(extraction);
+            SelectedRegion = null;
+
             MerchantName = invoice.MerchantName;
             InvoiceNumber = invoice.InvoiceNumber;
             InvoiceDate = invoice.InvoiceDate is { } date
@@ -859,9 +945,24 @@ public partial class ProcessingViewModel : ViewModelBase
         // be filed under whichever side ran last. An exact name is still resolved, since
         // that needs no interpretation — anything less is the user's choice to make from
         // the picker.
-        SelectedCustomer = Customers.FirstOrDefault(c =>
+        var exact = Customers.FirstOrDefault(c =>
             string.Equals(c.Name, invoice.MerchantName, StringComparison.OrdinalIgnoreCase)
             || string.Equals(c.AliasName, invoice.MerchantName, StringComparison.OrdinalIgnoreCase));
+
+        if (exact is not null)
+        {
+            SelectedCustomer = exact;
+            return;
+        }
+
+        // Still nothing, but the service ranked the catalog against what it read. Select
+        // the best of those even when it fell under the review threshold — the same rule
+        // the product rows follow. This is not the app second-guessing the threshold:
+        // MerchantNeedsReview is set from RequiresManualReview independently, so the
+        // review banner and the amber highlight are unaffected, and the picker's own text
+        // carries the score. An empty box for a merchant the service *did* rank simply
+        // hid a usable answer behind a scroll through the whole contacts table.
+        SelectedCustomer = CustomerChoices.FirstOrDefault(c => c.IsSuggestion)?.Customer;
     }
 
     /// <summary>
