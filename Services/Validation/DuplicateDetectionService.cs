@@ -6,7 +6,6 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
-using InvoiceDigitizationApp.Helpers;
 using InvoiceDigitizationApp.Models;
 using InvoiceDigitizationApp.Services.Data;
 
@@ -23,10 +22,11 @@ public sealed class DuplicateDetectionService : IDuplicateDetectionService
     private const decimal AmountTolerance = 0.01m;
 
     /// <summary>
-    /// Merchant names below this similarity are treated as different businesses. Set high
-    /// because a false duplicate warning on every save trains the user to dismiss them.
+    /// Confidence reported for a match found by the SQL query below. Fixed, because the
+    /// query matches the merchant name exactly — there is no similarity to report, and a
+    /// varying number would suggest a fuzziness that is not there.
     /// </summary>
-    private const double MerchantSimilarityThreshold = 0.85;
+    private const double SameInvoiceConfidence = 0.9;
 
     private readonly IInvoiceRepository _invoices;
 
@@ -64,10 +64,11 @@ public sealed class DuplicateDetectionService : IDuplicateDetectionService
             if (existing.InvoiceId == candidate.InvoiceId) continue;
             if (!seen.Add(existing.InvoiceId)) continue;
 
-            // The SQL already matched merchant exactly; re-check fuzzily so a trailing
-            // space or an alef variant doesn't silently drop a real duplicate.
-            var similarity = FuzzyMatch.Similarity(candidate.MerchantName, existing.MerchantName);
-            if (similarity < MerchantSimilarityThreshold) continue;
+            // No second, fuzzy pass. FindSimilarAsync already matched the merchant name
+            // exactly, so re-scoring it here could only ever reject a row the query had
+            // accepted — and it did that with the app's own copy of the similarity rules,
+            // which no longer exists. Duplicate detection now rests on what the query
+            // matched: same name, same total within a cent, within a day.
 
             var reason =
                 $"السجل رقم {existing.InvoiceId} يحمل الاسم نفسه " +
@@ -76,7 +77,7 @@ public sealed class DuplicateDetectionService : IDuplicateDetectionService
                 (existing.InvoiceDate is { } d ? $"، بتاريخ {d:yyyy-MM-dd}" : string.Empty) + ".";
 
             matches.Add(new DuplicateMatch(
-                existing, DuplicateKind.LikelySameInvoice, similarity, reason));
+                existing, DuplicateKind.LikelySameInvoice, SameInvoiceConfidence, reason));
         }
 
         return matches

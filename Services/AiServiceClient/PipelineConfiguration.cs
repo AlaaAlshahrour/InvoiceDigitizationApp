@@ -7,6 +7,9 @@ namespace InvoiceDigitizationApp.Services.AiServiceClient;
 
 // The C# half of docs/settings-config-contract.md. The Pydantic models in
 // Invoice-Extraction-pipeline/config/settings_contract.py are the other half.
+//
+// This object is sent as its own `config` part of the extract request, not nested inside
+// `options`: the two are owned by different screens and change on different schedules.
 
 /// <summary>
 /// One named preprocessing step: whether it runs, which algorithm implements it, and
@@ -100,20 +103,94 @@ public sealed class PreprocessingConfiguration
     }
 }
 
+/// <summary>
+/// A registered implementation plus its constructor arguments — the same shape as
+/// <see cref="PipelineStep"/> minus the on/off toggle, used wherever a stage names one
+/// pluggable collaborator.
+/// </summary>
+public sealed class ComponentConfiguration
+{
+    [JsonPropertyName("name")] public string Name { get; set; } = string.Empty;
+
+    [JsonPropertyName("params")]
+    public Dictionary<string, JsonNode?> Params { get; set; } = new();
+
+    public ComponentConfiguration Clone() => new()
+    {
+        Name = Name,
+        Params = PipelineStep.CloneParams(Params)
+    };
+}
+
+/// <summary>
+/// Which end-to-end reading strategy runs, and therefore which of
+/// <see cref="OcrConfiguration"/>'s fields mean anything.
+/// </summary>
+/// <remarks>
+/// <c>single_engine</c> uses <see cref="OcrConfiguration.Engine"/> and ignores the four
+/// components; the two region-based flows use the components and ignore the engine. Only
+/// the fields the selected flow names are ever built on the service side, which is the
+/// mechanism — not merely the intent — behind "layout_driven runs no text detector".
+/// </remarks>
+public sealed class FlowConfiguration
+{
+    [JsonPropertyName("name")] public string Name { get; set; } = "layout_driven";
+
+    [JsonPropertyName("params")]
+    public Dictionary<string, JsonNode?> Params { get; set; } = new();
+}
+
+/// <summary>
+/// How text gets read: one whole-page engine, or a composed detector / refiner / cropper /
+/// recognizer. Which half applies is <see cref="PipelineConfiguration.Flow"/>'s decision.
+/// </summary>
 public sealed class OcrConfiguration
 {
-    [JsonPropertyName("engine")] public string Engine { get; set; } = "tesseract";
+    /// <summary>
+    /// The <c>single_engine</c> flow's engine. Null under either region-based flow, where
+    /// there is no single engine to name — which is why this is nullable rather than
+    /// carrying a default that would quietly be wrong.
+    /// </summary>
+    [JsonPropertyName("engine")] public string? Engine { get; set; }
 
     [JsonPropertyName("engine_params")]
     public Dictionary<string, JsonNode?> EngineParams { get; set; } = new();
+
+    /// <summary>Detector-driven only: finds the ink anywhere on the page.</summary>
+    [JsonPropertyName("detector")] public ComponentConfiguration? Detector { get; set; }
+
+    /// <summary>Detector-driven only: squares the boxes up against the column layout.</summary>
+    [JsonPropertyName("refiner")] public ComponentConfiguration? Refiner { get; set; }
+
+    /// <summary>Both region-based flows: cuts each region out and prepares it for reading.</summary>
+    [JsonPropertyName("cropper")] public ComponentConfiguration? Cropper { get; set; }
+
+    /// <summary>Both region-based flows: reads one crop, prompted by its role.</summary>
+    [JsonPropertyName("recognizer")] public ComponentConfiguration? Recognizer { get; set; }
 }
 
 public sealed class TableExtractionConfiguration
 {
-    [JsonPropertyName("extractor")] public string Extractor { get; set; } = "grid_line";
+    [JsonPropertyName("extractor")] public string Extractor { get; set; } = "contour_based";
 
     [JsonPropertyName("extractor_params")]
     public Dictionary<string, JsonNode?> ExtractorParams { get; set; } = new();
+
+    /// <summary>
+    /// What the detected boxes <i>mean</i>. Separate from the extractor because "find the
+    /// ruled regions" is the same problem for every form, while "the box above the table
+    /// is the invoice number" is knowledge of one supplier's printed form.
+    /// </summary>
+    /// <remarks>
+    /// <c>passthrough</c> labels nothing, which leaves every role unknown — and a response
+    /// built on unlabelled boxes is guesswork, since the parser falls back to inferring
+    /// columns from x-positions. The named-field response shape only means anything over
+    /// classified boxes.
+    /// </remarks>
+    [JsonPropertyName("classifier")] public string Classifier { get; set; } = "bill_layout";
+
+    [JsonPropertyName("classifier_params")]
+    public Dictionary<string, JsonNode?> ClassifierParams { get; set; } = new();
 }
 
 public sealed class StringMatchingConfiguration
@@ -132,9 +209,14 @@ public sealed class StringMatchingConfiguration
     public string DictionaryPath { get; set; } = "keywords/ar_invoice_terms.json";
 }
 
+/// <summary>
+/// Not a user setting. The service forces <c>invoice_json</c> on every extract request —
+/// it <i>is</i> the documented response shape — so this is round-tripped rather than
+/// edited, and the settings page never offers it.
+/// </summary>
 public sealed class OutputConfiguration
 {
-    [JsonPropertyName("formatter")] public string Formatter { get; set; } = "ui_overlay_json";
+    [JsonPropertyName("formatter")] public string Formatter { get; set; } = "invoice_json";
 
     [JsonPropertyName("formatter_params")]
     public Dictionary<string, JsonNode?> FormatterParams { get; set; } = new();
@@ -156,6 +238,12 @@ public sealed class PipelineConfiguration
 {
     [JsonPropertyName("preprocessing")]
     public PreprocessingConfiguration Preprocessing { get; set; } = new();
+
+    /// <summary>
+    /// Which reading strategy runs. Sent above <c>ocr</c> because it decides which of that
+    /// section's fields are even meaningful.
+    /// </summary>
+    [JsonPropertyName("flow")] public FlowConfiguration Flow { get; set; } = new();
 
     [JsonPropertyName("ocr")] public OcrConfiguration Ocr { get; set; } = new();
 

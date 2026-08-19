@@ -8,37 +8,52 @@ namespace InvoiceDigitizationApp.Services.AiServiceClient;
 /// <summary>
 /// Converts a service <see cref="ExtractionResult"/> into a domain <see cref="Invoice"/>
 /// for the verification screen. Deliberately lossy: confidences and bounding boxes are
-/// UI concerns tracked separately by the ViewModel, not persisted with the invoice.
+/// UI concerns the ViewModel reads off the result directly, not values persisted with the
+/// invoice.
 /// </summary>
+/// <remarks>
+/// This is where the review threshold is applied to matched fields. The service sends the
+/// raw reading and a ranked list and decides nothing; a candidate becomes the value here
+/// only when it cleared <see cref="ExtractionThresholds.Review"/>, and otherwise the raw
+/// text stands unlinked so the screen can flag it. That is the whole reason the wire shape
+/// has no <c>value</c> on those fields — one side applying one threshold, visibly.
+/// </remarks>
 public static class ExtractionMapper
 {
     public static Invoice ToInvoice(ExtractionResult result, InvoiceType invoiceType)
     {
-        var header = result.Header;
+        var customer = result.CustomerName?.Accepted;
 
         var invoice = new Invoice
         {
-            MerchantName = PreferMatch(header?.MerchantName) ?? string.Empty,
-            InvoiceNumber = header?.InvoiceNumber?.Value,
-            City = header?.City?.Value,
-            InvoiceDate = ParseDate(header?.InvoiceDate?.Value),
-            TotalAmount = header?.TotalAmount?.Value ?? 0m,
-            InvoiceType = invoiceType,
+            // The catalog name when the match was strong enough to accept, else exactly
+            // what OCR read — never a blend of the two.
+            MerchantName = customer?.Value ?? result.CustomerName?.OriginalValue ?? string.Empty,
 
-            // The service matched the merchant — by name or by alias — against the
-            // Customers catalog it was handed, so the contact is already resolved.
-            CustomerId = header?.MerchantName?.MatchedId
+            // Only set when the match was accepted, so an unresolved counterparty stays
+            // visibly unresolved rather than pointing at a record nobody chose.
+            CustomerId = customer?.EntryId,
+
+            InvoiceNumber = Trimmed(result.InvoiceId?.Value),
+            InvoiceDate = ParseDate(result.Date?.Value),
+            TotalAmount = result.TotalInvoicePrice?.Value ?? 0m,
+            InvoiceType = invoiceType
         };
 
-        foreach (var line in result.LineItems)
+        var city = result.City?.Accepted;
+        invoice.City = city?.Value ?? Trimmed(result.City?.OriginalValue);
+
+        foreach (var row in result.Products)
         {
+            var product = row.ProductName?.Accepted;
+
             invoice.Items.Add(new InvoiceItem
             {
-                ProductName = PreferMatch(line.ProductName) ?? string.Empty,
-                ProductId = line.ProductName?.MatchedId,
-                Quantity = line.Quantity?.Value ?? 0m,
-                UnitPrice = line.UnitPrice?.Value ?? 0m,
-                TotalPrice = line.TotalPrice?.Value ?? 0m
+                ProductName = product?.Value ?? row.ProductName?.OriginalValue ?? string.Empty,
+                ProductId = product?.EntryId,
+                Quantity = row.Quantity?.Value ?? 0m,
+                UnitPrice = row.UnitPrice?.Value ?? 0m,
+                TotalPrice = row.TotalPrice?.Value ?? 0m
             });
         }
 
@@ -51,34 +66,29 @@ public static class ExtractionMapper
     }
 
     /// <summary>
-    /// Collects per-field confidences keyed by field name, so the verification screen can
-    /// flag anything the service was unsure about.
+    /// Per-header-field OCR confidences keyed by the Invoice property they belong to, so
+    /// the verification screen can flag anything the service was unsure about.
     /// </summary>
     public static Dictionary<string, double> CollectHeaderConfidences(ExtractionResult result)
     {
         var map = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-        var header = result.Header;
-        if (header is null) return map;
 
-        if (header.MerchantName is { } m) map[nameof(Invoice.MerchantName)] = m.Confidence;
-        if (header.InvoiceNumber is { } n) map[nameof(Invoice.InvoiceNumber)] = n.Confidence;
-        if (header.InvoiceDate is { } d) map[nameof(Invoice.InvoiceDate)] = d.Confidence;
-        if (header.City is { } c) map[nameof(Invoice.City)] = c.Confidence;
-        if (header.TotalAmount is { } t) map[nameof(Invoice.TotalAmount)] = t.Confidence;
+        if (result.CustomerName is { } customer)
+            map[nameof(Invoice.MerchantName)] = customer.OcrConfidence;
+        if (result.InvoiceId is { } number)
+            map[nameof(Invoice.InvoiceNumber)] = number.OcrConfidence;
+        if (result.Date is { } date)
+            map[nameof(Invoice.InvoiceDate)] = date.OcrConfidence;
+        if (result.City is { } city)
+            map[nameof(Invoice.City)] = city.OcrConfidence;
+        if (result.TotalInvoicePrice is { } total)
+            map[nameof(Invoice.TotalAmount)] = total.OcrConfidence;
 
         return map;
     }
 
-    /// <summary>
-    /// Prefers the catalog entry the value was matched to over the raw OCR text: a
-    /// confident match to a known merchant is more useful than the OCR's spelling of it.
-    /// </summary>
-    private static string? PreferMatch(ExtractedField<string>? field)
-    {
-        if (field is null) return null;
-        if (!string.IsNullOrWhiteSpace(field.MatchedTo)) return field.MatchedTo;
-        return string.IsNullOrWhiteSpace(field.Value) ? null : field.Value;
-    }
+    private static string? Trimmed(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static DateOnly? ParseDate(string? value)
     {

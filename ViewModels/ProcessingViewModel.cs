@@ -9,7 +9,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using InvoiceDigitizationApp.Helpers;
 using InvoiceDigitizationApp.Models;
 using InvoiceDigitizationApp.Services.AiServiceClient;
 using InvoiceDigitizationApp.Services.Batch;
@@ -33,6 +32,16 @@ public enum InvoiceImageView
     OcrInput
 }
 
+/// <summary>What a mouse drag inside the image pane does.</summary>
+public enum InvoiceImageTool
+{
+    /// <summary>Drag anywhere to move the image under the pointer — the hand tool.</summary>
+    Pan,
+
+    /// <summary>Drag a rectangle over a region to zoom the pane into it.</summary>
+    Marquee
+}
+
 /// <summary>
 /// The side-by-side verification screen: original image on one side, editable extracted
 /// data on the other. This is the core of the product — everything OCR produces passes
@@ -50,6 +59,7 @@ public partial class ProcessingViewModel : ViewModelBase
     private readonly IDuplicateDetectionService _duplicates;
     private readonly IInvoiceBatchService _batch;
     private readonly IPipelineConfigurationStore _pipeline;
+    private readonly IExtractionWarningBuilder _warnings;
 
     private int _editingInvoiceId;
     private string? _contentHash;
@@ -58,7 +68,7 @@ public partial class ProcessingViewModel : ViewModelBase
     /// How many ranked alternatives each picker offers. Read once per screen from
     /// settings rather than per row, which would be a database hit per line item.
     /// </summary>
-    private int _maxCandidates = CatalogMatcher.DefaultTopK;
+    private int _maxCandidates = MatchChoiceBuilder.DefaultTopK;
 
     /// <summary>
     /// Paths of the preprocessed renderings for the invoice currently on screen, saved
@@ -83,9 +93,11 @@ public partial class ProcessingViewModel : ViewModelBase
         IInvoiceValidationService validation,
         IDuplicateDetectionService duplicates,
         IInvoiceBatchService batch,
-        IPipelineConfigurationStore pipeline)
+        IPipelineConfigurationStore pipeline,
+        IExtractionWarningBuilder warnings)
     {
         _pipeline = pipeline;
+        _warnings = warnings;
         _aiService = aiService;
         _invoices = invoices;
         _products = products;
@@ -148,6 +160,13 @@ public partial class ProcessingViewModel : ViewModelBase
     /// imports are, and it is available for any source the service accepts.
     /// </summary>
     [ObservableProperty] private InvoiceImageView _selectedImageView = InvoiceImageView.Enhanced;
+
+    /// <summary>
+    /// What dragging inside the image pane does. Panning is the default because it is the
+    /// only way to reach the rest of a zoomed-in invoice with a mouse — a ScrollViewer
+    /// pans on touch and on the wheel, but ignores a mouse drag entirely.
+    /// </summary>
+    [ObservableProperty] private InvoiceImageTool _selectedImageTool = InvoiceImageTool.Pan;
 
     // Stored rather than computed. A File.Exists on every binding evaluation would hit
     // the disk during layout; these are refreshed explicitly whenever the invoice changes.
@@ -226,6 +245,27 @@ public partial class ProcessingViewModel : ViewModelBase
 
     public bool HasValidationMessages => ValidationMessages.Count > 0;
 
+    /// <summary>
+    /// The validation banner's title. It carries the count because the list under it is
+    /// height-capped and scrolls: without a total, a long run of warnings looks like
+    /// however many happen to fit.
+    /// </summary>
+    public string ValidationSummaryTitle => ValidationMessages.Count switch
+    {
+        0 or 1 => "تحقق من هذه العناصر قبل الحفظ",
+        _ => $"تحقق من هذه العناصر قبل الحفظ ({ValidationMessages.Count})"
+    };
+
+    /// <summary>
+    /// Raises everything the validation banner reads. Its visibility and the count in its
+    /// title come from one collection and always move together.
+    /// </summary>
+    private void RefreshValidationSummary()
+    {
+        OnPropertyChanged(nameof(HasValidationMessages));
+        OnPropertyChanged(nameof(ValidationSummaryTitle));
+    }
+
     public int InvalidRowCount => Items.Count(i => !i.IsArithmeticValid);
 
     /// <summary>Rows still naming a product that is not in the catalog.</summary>
@@ -295,24 +335,22 @@ public partial class ProcessingViewModel : ViewModelBase
         foreach (var product in products) Products.Add(product);
 
         _maxCandidates = (int)await _settings.GetDoubleAsync(
-            SettingKeys.MaxMatchCandidates, CatalogMatcher.DefaultTopK);
+            SettingKeys.MaxMatchCandidates, MatchChoiceBuilder.DefaultTopK);
 
-        // Until an extraction supplies ranked candidates, the picker is simply the
+        // Until an extraction supplies ranked results, the picker is simply the
         // catalog in its own order.
-        RebuildCustomerChoices(candidates: null, ocrText: null);
+        RebuildCustomerChoices(results: null);
     }
 
     /// <summary>
     /// Rebuilds the counterparty picker so the extraction's suggestions sit at the top.
     /// </summary>
-    private void RebuildCustomerChoices(
-        IReadOnlyList<MatchCandidate>? candidates, string? ocrText)
+    private void RebuildCustomerChoices(IReadOnlyList<MatchResult>? results)
     {
         var previous = SelectedCustomer;
 
         CustomerChoices.Clear();
-        foreach (var choice in MatchChoiceBuilder.ForCustomers(
-                     Customers, candidates, ocrText, _maxCandidates))
+        foreach (var choice in MatchChoiceBuilder.ForCustomers(Customers, results))
         {
             CustomerChoices.Add(choice);
         }
@@ -371,14 +409,15 @@ public partial class ProcessingViewModel : ViewModelBase
         _ocrImagePath = null;
         _contentHash = await _duplicates.ComputeFileHashAsync(filePath, ct);
 
-        var options = await BuildExtractionOptionsAsync(ct);
+        var options = BuildExtractionOptions();
+        var configuration = await _pipeline.GetAsync(ct);
 
         SetStatus("جارٍ استخراج بيانات الفاتورة…");
 
         ExtractionResult result;
         try
         {
-            result = await _aiService.ExtractAsync(filePath, options, ct);
+            result = await _aiService.ExtractAsync(filePath, options, configuration, ct);
         }
         catch (AiServiceException ex)
         {
@@ -406,15 +445,13 @@ public partial class ProcessingViewModel : ViewModelBase
 
         ApplyInvoice(invoice, result);
 
-        RawOcrText = result.RawText;
+        // Assembled from the fields' own readings: the service no longer sends a raw OCR
+        // dump, and a reading attributed to the field it came from is more use than one.
+        RawOcrText = result.DetectedText();
         HasUnsavedChanges = true;
 
         Validate();
-
-        var warnings = result.Warnings.Count;
-        SetStatus(warnings == 0
-            ? $"تم استخراج {Items.Count} بند خلال {result.ProcessingMs} مللي ثانية. راجع واحفظ."
-            : $"تم استخراج {Items.Count} بند مع {warnings} تحذير. راجع بعناية.");
+        ReportExtraction(result, invoice);
     }
 
     /// <summary>
@@ -422,20 +459,18 @@ public partial class ProcessingViewModel : ViewModelBase
     /// the batch, which must send exactly the same catalogs or the two would match
     /// merchants and products differently.
     /// </summary>
-    private async Task<ExtractionOptions> BuildExtractionOptionsAsync(
-        CancellationToken ct = default) => new()
+    /// <remarks>
+    /// The pipeline configuration is deliberately not here: it travels as its own part of
+    /// the request, fetched separately by each caller, because it comes from the settings
+    /// page rather than from this screen's catalogs.
+    /// </remarks>
+    private ExtractionOptions BuildExtractionOptions() => new()
     {
-        InvoiceType = SelectedInvoiceType,
-
         // Ask for the preprocessed renderings so they can be persisted alongside the
         // original and shown when the original is hard to read.
         ReturnDebugImages = true,
 
         MaxCandidates = _maxCandidates,
-
-        // Null when the user has never opened the settings page, which tells the service
-        // to run its own defaults rather than a copy of them frozen at install time.
-        Configuration = await _pipeline.GetAsync(ct),
 
         // Each contact travels as one record carrying every name it answers to. Name and
         // AliasName are equivalent match targets — invoices are printed with whichever
@@ -446,9 +481,10 @@ public partial class ProcessingViewModel : ViewModelBase
             {
                 CustomerId = c.CustomerId,
                 Name = c.Name,
-                Aliases = CatalogMatcher.NamesOf(c)
-                    .Where(n => !string.Equals(n, c.Name, StringComparison.OrdinalIgnoreCase))
-                    .ToList()
+                Aliases = string.IsNullOrWhiteSpace(c.AliasName)
+                          || string.Equals(c.AliasName, c.Name, StringComparison.OrdinalIgnoreCase)
+                    ? new List<string>()
+                    : new List<string> { c.AliasName!.Trim() }
             })
             .ToList(),
 
@@ -487,7 +523,11 @@ public partial class ProcessingViewModel : ViewModelBase
                 SetStatus($"جارٍ معالجة {p.CompletedCount} من {p.TotalCount}… ({p.CurrentFileName})"));
 
             await _batch.StartAsync(
-                paths, await BuildExtractionOptionsAsync(ct), progress, ct);
+                paths,
+                BuildExtractionOptions(),
+                await _pipeline.GetAsync(ct),
+                progress,
+                ct);
 
             if (_batch.TotalCount == 0)
             {
@@ -579,11 +619,11 @@ public partial class ProcessingViewModel : ViewModelBase
 
         ApplyInvoice(invoice, item.Result);
 
-        RawOcrText = item.Result.RawText;
+        RawOcrText = item.Result.DetectedText();
         HasUnsavedChanges = true;
 
         Validate();
-        SetStatus($"الفاتورة {_batch.PositionLabel} — راجع واحفظ.");
+        ReportExtraction(item.Result, invoice, $"الفاتورة {_batch.PositionLabel} — ");
 
         RefreshBatchState();
 
@@ -625,7 +665,7 @@ public partial class ProcessingViewModel : ViewModelBase
 
         HasUnsavedChanges = false;
 
-        OnPropertyChanged(nameof(HasValidationMessages));
+        RefreshValidationSummary();
         RefreshTotals();
         RefreshImageAvailability();
     }
@@ -720,12 +760,10 @@ public partial class ProcessingViewModel : ViewModelBase
 
             // The picker is rebuilt before the contact is resolved: ResolveCustomer sets
             // SelectedCustomer, and the entry it should light up has to exist by then.
-            RebuildCustomerChoices(
-                extraction?.Header?.MerchantName?.Candidates,
-                extraction?.Header?.MerchantName?.Raw ?? invoice.MerchantName);
+            RebuildCustomerChoices(extraction?.CustomerName?.Results);
 
             MerchantNeedsReview =
-                extraction?.Header?.MerchantName?.RequiresManualReview ?? false;
+                extraction?.CustomerName?.RequiresManualReview ?? false;
 
             ResolveCustomer(invoice);
 
@@ -739,20 +777,20 @@ public partial class ProcessingViewModel : ViewModelBase
             Items.Clear();
             for (var i = 0; i < invoice.Items.Count; i++)
             {
-                // Confidence and candidates come from the extraction when present; a
-                // hand-entered or previously-saved row is treated as fully confident and
-                // gets its suggestions from a local match instead.
-                var extracted = extraction is not null && i < extraction.LineItems.Count
-                    ? extraction.LineItems[i].ProductName
+                // Confidence and ranked results come from the extraction when present.
+                // A hand-entered or previously-saved row is treated as fully confident
+                // and its picker is simply the catalog: there is nothing to rank it
+                // against, and nothing here re-derives a ranking the service did not send.
+                var extracted = extraction is not null && i < extraction.Products.Count
+                    ? extraction.Products[i].ProductName
                     : null;
 
                 AddRow(new InvoiceItemRowViewModel(
                     invoice.Items[i],
                     Products,
-                    extracted?.Confidence ?? 1.0,
-                    extracted?.Candidates,
-                    extracted?.RequiresManualReview ?? false,
-                    _maxCandidates));
+                    extracted?.OcrConfidence ?? 1.0,
+                    extracted?.Results,
+                    extracted?.RequiresManualReview ?? false));
             }
 
             LinkProductsToCatalog();
@@ -815,30 +853,62 @@ public partial class ProcessingViewModel : ViewModelBase
             }
         }
 
-        // Name and AliasName are equivalent here, exactly as on the service side, so a
-        // merchant printed under either spelling still lands on its contact.
-        SelectedCustomer = CatalogMatcher.FindCustomer(invoice.MerchantName, Customers)?.Customer;
+        // No local fuzzy fallback. The service already matched this text against the
+        // catalog it was handed and reported what it found; re-matching here with a second
+        // implementation would answer the same question differently, and the invoice would
+        // be filed under whichever side ran last. An exact name is still resolved, since
+        // that needs no interpretation — anything less is the user's choice to make from
+        // the picker.
+        SelectedCustomer = Customers.FirstOrDefault(c =>
+            string.Equals(c.Name, invoice.MerchantName, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(c.AliasName, invoice.MerchantName, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
-    /// Resolves each unlinked row to a catalog product — exact name first, then a fuzzy
-    /// match. Rows that resolve to nothing stay unlinked and are reported by validation;
-    /// they are never silently saved as free text.
+    /// Links each unlinked row to the catalog product whose name it matches exactly. Rows
+    /// that resolve to nothing stay unlinked and are reported by validation; they are
+    /// never silently saved as free text.
     /// </summary>
+    /// <remarks>
+    /// Exact only. A close-but-not-equal name is what the row's picker is for, already
+    /// ranked by the service — linking it here on a second opinion would silently commit
+    /// the user to a product they never chose, which is the one outcome the ranked list
+    /// exists to prevent.
+    /// </remarks>
     private void LinkProductsToCatalog()
     {
         foreach (var row in Items)
         {
             if (row.IsProductLinked) continue;
 
-            var exact = Products.FirstOrDefault(p =>
+            var match = Products.FirstOrDefault(p =>
                 string.Equals(p.Name, row.ProductName, StringComparison.OrdinalIgnoreCase));
 
-            var match = exact ?? CatalogMatcher.FindProduct(row.ProductName, Products)?.Product;
             if (match is not null) row.LinkTo(match);
         }
 
         RefreshLinkState();
+    }
+
+    /// <summary>
+    /// Sets the status line from the extraction's own warnings, computed here rather than
+    /// sent by the service.
+    /// </summary>
+    private void ReportExtraction(ExtractionResult result, Invoice invoice, string prefix = "")
+    {
+        var warnings = _warnings.Build(result, invoice);
+
+        if (warnings.Count == 0)
+        {
+            SetStatus(
+                $"{prefix}تم استخراج {Items.Count} بند خلال {result.ProcessingMs} مللي ثانية. راجع واحفظ.");
+            return;
+        }
+
+        // The most serious one by name, not just a count: "3 warnings" tells the user to
+        // go looking, while the headline says what for.
+        SetStatus(
+            $"{prefix}تم استخراج {Items.Count} بند مع {warnings.Count} تحذير — {warnings[0].Message} راجع بعناية.");
     }
 
     // ---- row management ---------------------------------------------------
@@ -1013,7 +1083,7 @@ public partial class ProcessingViewModel : ViewModelBase
         foreach (var issue in result.Issues)
             ValidationMessages.Add(issue.Message);
 
-        OnPropertyChanged(nameof(HasValidationMessages));
+        RefreshValidationSummary();
         RefreshTotals();
 
         if (result.IsClean)
@@ -1041,7 +1111,7 @@ public partial class ProcessingViewModel : ViewModelBase
             ValidationMessages.Clear();
             foreach (var issue in result.Issues)
                 ValidationMessages.Add(issue.Message);
-            OnPropertyChanged(nameof(HasValidationMessages));
+            RefreshValidationSummary();
 
             if (result.HasErrors)
             {

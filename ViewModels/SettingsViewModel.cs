@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
+using System.Text.Json.Nodes;
 using System.Linq;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -64,7 +65,17 @@ public partial class SettingsViewModel : ViewModelBase
     /// <summary>The three preprocessing phases, each holding its step cards.</summary>
     public ObservableCollection<PipelinePhaseViewModel> Phases { get; } = new();
 
-    /// <summary>OCR, table extraction and keyword matching — one choice each.</summary>
+    /// <summary>
+    /// The reading strategy, as a single card. Its own collection rather than the first
+    /// entry of <see cref="RecognitionStages"/> because changing it rebuilds that list:
+    /// which OCR components exist at all is the flow's decision.
+    /// </summary>
+    public ObservableCollection<PipelineStepViewModel> ReadingStrategy { get; } = new();
+
+    /// <summary>
+    /// The stages the selected flow actually uses, plus table extraction, its classifier,
+    /// and keyword matching — one choice each.
+    /// </summary>
     public ObservableCollection<PipelineStepViewModel> RecognitionStages { get; } = new();
 
     /// <summary>True once the pipeline cards have been built, so the page can show them.</summary>
@@ -139,7 +150,7 @@ public partial class SettingsViewModel : ViewModelBase
     private void BuildPipelineCards()
     {
         Phases.Clear();
-        RecognitionStages.Clear();
+        ReadingStrategy.Clear();
 
         var steps = _configuration.Preprocessing.ByKey();
 
@@ -167,68 +178,212 @@ public partial class SettingsViewModel : ViewModelBase
             Phases.Add(new PipelinePhaseViewModel(phase.Key, cards));
         }
 
-        RecognitionStages.Add(new PipelineStepViewModel(
-            "ocr",
-            "محرك التعرّف الضوئي",
-            "البرنامج الذي يقرأ نص الفاتورة من الصورة.",
-            PipelineCatalog.OcrEngines,
-            _configuration.Ocr.Engine,
-            _configuration.Ocr.EngineParams,
+        var flow = new PipelineStepViewModel(
+            PipelineCatalog.FlowStage,
+            "طريقة القراءة",
+            "كيف تُقرأ الصفحة. هذا الاختيار يحدّد أي مكوّنات التعرّف تظهر أدناه أصلاً.",
+            PipelineCatalog.Flows,
+            _configuration.Flow.Name,
+            _configuration.Flow.Params,
             enabled: true,
-            canDisable: false));
+            canDisable: false);
 
-        RecognitionStages.Add(new PipelineStepViewModel(
-            "table_extraction",
+        // Rebuild the stages below whenever the strategy changes: a component the new flow
+        // does not use is not merely irrelevant, it is never built, and leaving its card on
+        // screen would invite tuning something with no effect.
+        flow.PropertyChanged += OnFlowChanged;
+        ReadingStrategy.Add(flow);
+
+        BuildRecognitionStages();
+    }
+
+    private void OnFlowChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(PipelineStepViewModel.SelectedAlgorithm))
+            BuildRecognitionStages();
+    }
+
+    /// <summary>The current flow's name, from the card if it is built and the configuration otherwise.</summary>
+    private string SelectedFlowName =>
+        ReadingStrategy.FirstOrDefault()?.SelectedName ?? _configuration.Flow.Name;
+
+    /// <summary>
+    /// Builds one card per stage the selected flow uses, then the table and matching
+    /// stages every flow shares.
+    /// </summary>
+    private void BuildRecognitionStages()
+    {
+        // Keep whatever the user had typed into the cards being replaced, so switching
+        // flow and back does not silently reset a recognizer's parameters.
+        CollectRecognitionStages();
+        RecognitionStages.Clear();
+
+        foreach (var stage in PipelineCatalog.OcrStagesFor(SelectedFlowName))
+        {
+            var card = stage switch
+            {
+                PipelineCatalog.OcrStage => Card(
+                    stage, "محرك التعرّف الضوئي",
+                    "البرنامج الذي يقرأ نص الفاتورة من الصورة كاملة.",
+                    PipelineCatalog.OcrEngines,
+                    _configuration.Ocr.Engine, _configuration.Ocr.EngineParams),
+
+                PipelineCatalog.DetectorStage => ComponentCard(
+                    stage, "كاشف النص",
+                    "يجد مواضع الحبر في الصفحة قبل قراءتها.",
+                    PipelineCatalog.Detectors, _configuration.Ocr.Detector),
+
+                PipelineCatalog.RefinerStage => ComponentCard(
+                    stage, "تقويم المربّعات",
+                    "يقوّم مربّعات الكاشف على حدود الأعمدة.",
+                    PipelineCatalog.Refiners, _configuration.Ocr.Refiner),
+
+                PipelineCatalog.CropperStage => ComponentCard(
+                    stage, "اقتطاع الخانات",
+                    "يقتطع كل خانة من الصفحة ويهيّئها للقراءة.",
+                    PipelineCatalog.Croppers, _configuration.Ocr.Cropper),
+
+                _ => ComponentCard(
+                    PipelineCatalog.RecognizerStage, "قارئ الخانات",
+                    "يقرأ خانةً واحدة، بالمطالبة التي يقتضيها دورها في الفاتورة.",
+                    PipelineCatalog.Recognizers, _configuration.Ocr.Recognizer)
+            };
+
+            RecognitionStages.Add(card);
+        }
+
+        RecognitionStages.Add(Card(
+            PipelineCatalog.TableExtractionStage,
             "استخراج الجدول",
             "يحدّد خلايا جدول البنود ليُقرأ كل عمود على حدة.",
             PipelineCatalog.TableExtractors,
             _configuration.TableExtraction.Extractor,
-            _configuration.TableExtraction.ExtractorParams,
-            enabled: true,
-            canDisable: false));
+            _configuration.TableExtraction.ExtractorParams));
 
-        RecognitionStages.Add(new PipelineStepViewModel(
-            "string_matching",
+        RecognitionStages.Add(Card(
+            PipelineCatalog.TableClassifierStage,
+            "تصنيف الخانات",
+            "يحدّد ما تعنيه كل خانة: رقم الفاتورة، اسم الزبون، عمود الكمية… بدونه تبقى الأدوار مجهولة.",
+            PipelineCatalog.TableClassifiers,
+            _configuration.TableExtraction.Classifier,
+            _configuration.TableExtraction.ClassifierParams));
+
+        RecognitionStages.Add(Card(
+            PipelineCatalog.StringMatchingStage,
             "مطابقة النصوص بقاموس الكلمات",
             "تصحيح المصطلحات الشائعة في الفاتورة. مطابقة أسماء الزبائن والمنتجات بقاعدة البيانات تجري دائمًا وليست من ضمن هذا الخيار.",
             PipelineCatalog.StringMatchers,
             _configuration.StringMatching.Algorithm,
-            _configuration.StringMatching.AlgorithmParams,
-            enabled: true,
-            canDisable: false));
+            _configuration.StringMatching.AlgorithmParams));
     }
 
-    /// <summary>Collects the cards back into the configuration object.</summary>
-    private PipelineConfiguration BuildConfiguration()
+    private static PipelineStepViewModel Card(
+        string key,
+        string label,
+        string description,
+        IReadOnlyList<PipelineAlgorithm> algorithms,
+        string? selected,
+        Dictionary<string, JsonNode?>? parameters) =>
+        new(key, label, description, algorithms,
+            selected ?? algorithms[0].Name,
+            parameters ?? PipelineConfigurationStore.DefaultParams(algorithms[0]),
+            enabled: true,
+            canDisable: false);
+
+    /// <summary>
+    /// A card for a nullable component. Null means the configuration was written for a
+    /// flow that does not use this stage, so the catalog's recommended entry is what the
+    /// card opens on.
+    /// </summary>
+    private static PipelineStepViewModel ComponentCard(
+        string key,
+        string label,
+        string description,
+        IReadOnlyList<PipelineAlgorithm> algorithms,
+        ComponentConfiguration? component) =>
+        Card(key, label, description, algorithms, component?.Name, component?.Params);
+
+    /// <summary>
+    /// Writes the recognition cards back into <see cref="_configuration"/>, so their values
+    /// survive a rebuild of the list.
+    /// </summary>
+    private void CollectRecognitionStages()
     {
-        // Cloned so the parts the page does not expose survive untouched.
-        var configuration = _configuration.Clone();
-
-        foreach (var step in Phases.SelectMany(phase => phase.Steps))
-            configuration.Preprocessing.Set(step.Key, step.ToStep());
-
         foreach (var stage in RecognitionStages)
         {
             switch (stage.Key)
             {
-                case "ocr":
-                    configuration.Ocr.Engine = stage.SelectedName;
-                    configuration.Ocr.EngineParams = stage.ToParams();
+                case PipelineCatalog.OcrStage:
+                    _configuration.Ocr.Engine = stage.SelectedName;
+                    _configuration.Ocr.EngineParams = stage.ToParams();
                     break;
 
-                case "table_extraction":
-                    configuration.TableExtraction.Extractor = stage.SelectedName;
-                    configuration.TableExtraction.ExtractorParams = stage.ToParams();
+                case PipelineCatalog.DetectorStage:
+                    _configuration.Ocr.Detector = ToComponent(stage);
                     break;
 
-                case "string_matching":
-                    configuration.StringMatching.Algorithm = stage.SelectedName;
-                    configuration.StringMatching.AlgorithmParams = stage.ToParams();
+                case PipelineCatalog.RefinerStage:
+                    _configuration.Ocr.Refiner = ToComponent(stage);
+                    break;
+
+                case PipelineCatalog.CropperStage:
+                    _configuration.Ocr.Cropper = ToComponent(stage);
+                    break;
+
+                case PipelineCatalog.RecognizerStage:
+                    _configuration.Ocr.Recognizer = ToComponent(stage);
+                    break;
+
+                case PipelineCatalog.TableExtractionStage:
+                    _configuration.TableExtraction.Extractor = stage.SelectedName;
+                    _configuration.TableExtraction.ExtractorParams = stage.ToParams();
+                    break;
+
+                case PipelineCatalog.TableClassifierStage:
+                    _configuration.TableExtraction.Classifier = stage.SelectedName;
+                    _configuration.TableExtraction.ClassifierParams = stage.ToParams();
+                    break;
+
+                case PipelineCatalog.StringMatchingStage:
+                    _configuration.StringMatching.Algorithm = stage.SelectedName;
+                    _configuration.StringMatching.AlgorithmParams = stage.ToParams();
                     break;
             }
         }
+    }
 
-        return configuration;
+    private static ComponentConfiguration ToComponent(PipelineStepViewModel stage) => new()
+    {
+        Name = stage.SelectedName,
+        Params = stage.ToParams()
+    };
+
+    /// <summary>Collects the cards back into the configuration object.</summary>
+    private PipelineConfiguration BuildConfiguration()
+    {
+        foreach (var step in Phases.SelectMany(phase => phase.Steps))
+            _configuration.Preprocessing.Set(step.Key, step.ToStep());
+
+        _configuration.Flow.Name = SelectedFlowName;
+        _configuration.Flow.Params =
+            ReadingStrategy.FirstOrDefault()?.ToParams() ?? new Dictionary<string, JsonNode?>();
+
+        CollectRecognitionStages();
+
+        // The components the selected flow does not use are cleared rather than left
+        // behind. A stale detector under layout_driven is not merely unused — it is a
+        // value the settings page no longer shows and nobody can see to correct.
+        var used = PipelineCatalog.OcrStagesFor(SelectedFlowName);
+
+        if (!used.Contains(PipelineCatalog.OcrStage)) _configuration.Ocr.Engine = null;
+        if (!used.Contains(PipelineCatalog.DetectorStage)) _configuration.Ocr.Detector = null;
+        if (!used.Contains(PipelineCatalog.RefinerStage)) _configuration.Ocr.Refiner = null;
+        if (!used.Contains(PipelineCatalog.CropperStage)) _configuration.Ocr.Cropper = null;
+        if (!used.Contains(PipelineCatalog.RecognizerStage)) _configuration.Ocr.Recognizer = null;
+
+        // Cloned so the page keeps editing its own copy: saving must not hand the store an
+        // object the cards go on mutating.
+        return _configuration.Clone();
     }
 
     [RelayCommand]
@@ -269,8 +424,7 @@ public partial class SettingsViewModel : ViewModelBase
 
             if (IsPipelineLoaded)
             {
-                _configuration = BuildConfiguration();
-                await _pipeline.SaveAsync(_configuration);
+                await _pipeline.SaveAsync(BuildConfiguration());
                 PipelineSource = "الإعدادات المحفوظة على هذا الجهاز.";
             }
 

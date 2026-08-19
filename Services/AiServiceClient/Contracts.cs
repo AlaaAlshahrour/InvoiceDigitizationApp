@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json.Serialization;
 
 namespace InvoiceDigitizationApp.Services.AiServiceClient;
@@ -9,93 +11,157 @@ namespace InvoiceDigitizationApp.Services.AiServiceClient;
 // compatible.
 
 /// <summary>
-/// One entry of a field's ranked candidate list.
+/// A box on the corrected page: origin plus size, not two corners.
 /// </summary>
 /// <remarks>
-/// <see cref="SimilarityScore"/> is a <b>percentage</b>, 0–100, which is what the
-/// dropdown displays beside each entry. The field-level
-/// <see cref="ExtractedField{T}.MatchScore"/> is the same number as a 0–1 fraction, kept
-/// for the confidence rendering that already works that way.
+/// Coordinates are in the space of the geometrically corrected page, whose dimensions are
+/// <see cref="ExtractionSource.Width"/> × <see cref="ExtractionSource.Height"/> — the same
+/// image the verification screen displays, so a box needs no remapping to be drawn on it.
+/// The debug renderings are downscaled, so boxes do <b>not</b> map 1:1 onto those.
 /// </remarks>
-public sealed class MatchCandidate
+public sealed class BoundingBox
 {
-    [JsonPropertyName("matched_value")]
-    public string MatchedValue { get; set; } = string.Empty;
-
-    [JsonPropertyName("similarity_score")]
-    public double SimilarityScore { get; set; }
-
-    /// <summary>Primary key of the catalog record, when the candidate came from one.</summary>
-    [JsonPropertyName("matched_id")]
-    public int? MatchedId { get; set; }
-
-    /// <summary>The specific name that scored, when it differs from the canonical value.</summary>
-    [JsonPropertyName("matched_name")]
-    public string? MatchedName { get; set; }
-
-    /// <summary>What the picker shows: the name, with how well it scored.</summary>
-    public string DisplayText => $"{MatchedValue}  ({SimilarityScore:0.#}%)";
+    [JsonPropertyName("x")] public int X { get; set; }
+    [JsonPropertyName("y")] public int Y { get; set; }
+    [JsonPropertyName("w")] public int W { get; set; }
+    [JsonPropertyName("h")] public int H { get; set; }
 }
 
 /// <summary>
-/// Envelope shared by every extracted field, carrying the value plus the confidence and
-/// catalog-match metadata the verification screen renders.
+/// One ranked catalog entry offered for a matched field.
 /// </summary>
-/// <typeparam name="T">string for text fields, decimal? for numeric ones.</typeparam>
-public sealed class ExtractedField<T>
+public sealed class MatchResult
+{
+    /// <summary>
+    /// The catalog row's primary key, sent as a string. Null for a match that came from no
+    /// record — cities usually, since there is no Cities table.
+    /// </summary>
+    [JsonPropertyName("id")]
+    public string? Id { get; set; }
+
+    /// <summary>
+    /// The canonical catalog name — always Customers.Name / Products.Name, even when an
+    /// alias is what scored, so the invoice is filed consistently however it was printed.
+    /// </summary>
+    [JsonPropertyName("value")]
+    public string Value { get; set; } = string.Empty;
+
+    /// <summary>Similarity as a 0–1 fraction, not a percentage.</summary>
+    [JsonPropertyName("string_matching_score")]
+    public double StringMatchingScore { get; set; }
+
+    /// <summary><see cref="Id"/> as the integer primary key it came from, when it parses.</summary>
+    public int? EntryId =>
+        int.TryParse(Id, System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out var id)
+            ? id
+            : null;
+
+    /// <summary>What the picker shows: the name, with how well it scored.</summary>
+    public string DisplayText => $"{Value}  ({StringMatchingScore * 100:0.#}%)";
+}
+
+/// <summary>
+/// A field read straight off the page, with nothing to match it against — the invoice
+/// number, the date, an amount.
+/// </summary>
+/// <typeparam name="T">
+/// The reading's type, and always a <b>nullable</b> one — <c>string?</c>, <c>int?</c>,
+/// <c>decimal?</c>. Null means the field was not found, which is a different thing from a
+/// total of zero or an empty invoice number, and a non-nullable <c>decimal</c> here would
+/// deserialize the contract's <c>null</c> into exactly that confusion.
+/// </typeparam>
+public sealed class ValueField<T>
 {
     [JsonPropertyName("value")]
-    public T? Value { get; set; }
+    public T Value { get; set; } = default!;
 
-    [JsonPropertyName("confidence")]
-    public double Confidence { get; set; }
+    [JsonPropertyName("ocr_confidence")]
+    public double OcrConfidence { get; set; }
 
-    /// <summary>Pre-normalization text, when normalization changed the value.</summary>
-    [JsonPropertyName("raw")]
-    public string? Raw { get; set; }
+    [JsonPropertyName("bounding_box")]
+    public BoundingBox? BoundingBox { get; set; }
+
+    /// <summary>True when OCR was unsure enough that the screen should flag the field.</summary>
+    public bool IsLowConfidence =>
+        Value is not null && OcrConfidence < ExtractionThresholds.Review;
+}
+
+/// <summary>
+/// A field matched against one of the catalogs the request carried — the counterparty, the
+/// city, a product name.
+/// </summary>
+/// <remarks>
+/// There is deliberately no <c>Value</c>. <see cref="OriginalValue"/> is always the raw OCR
+/// text and <see cref="Results"/> is what the catalog offered; choosing between them is
+/// this app's decision, made here against <see cref="ExtractionThresholds.Review"/>. A
+/// field carrying both a value and a candidate list invites two questions the payload
+/// cannot answer — was that value read or chosen, and against what threshold — and gets
+/// them wrong silently.
+/// </remarks>
+public sealed class MatchedField
+{
+    [JsonPropertyName("bounding_box")]
+    public BoundingBox? BoundingBox { get; set; }
+
+    /// <summary>Confidence of the OCR reading, not of the match.</summary>
+    [JsonPropertyName("ocr_confidence")]
+    public double OcrConfidence { get; set; }
+
+    /// <summary>What the paper said. Never a candidate substituted for it.</summary>
+    [JsonPropertyName("original_value")]
+    public string? OriginalValue { get; set; }
+
+    /// <summary>Ranked catalog entries, best first. Empty when nothing resembled the reading.</summary>
+    [JsonPropertyName("results")]
+    public List<MatchResult> Results { get; set; } = new();
+
+    /// <summary>The top-ranked entry, or null when the catalog offered nothing.</summary>
+    public MatchResult? Best => Results.Count > 0 ? Results[0] : null;
 
     /// <summary>
-    /// Canonical catalog entry this value was fuzzy-matched to, if any. For a merchant
-    /// this is always the Customers.Name, even when the hit came through an alias.
+    /// True when the best entry was too weak to accept unseen — or when there was none.
+    /// These are the fields the verification screen highlights in amber.
     /// </summary>
-    [JsonPropertyName("matched_to")]
-    public string? MatchedTo { get; set; }
+    public bool RequiresManualReview =>
+        Best is null || Best.StringMatchingScore < ExtractionThresholds.Review;
 
     /// <summary>
-    /// Primary key of the matched catalog row (CustomerId or ProductId), letting the app
-    /// bind straight to the record instead of re-resolving the name.
+    /// The entry to pre-select, or null to leave the raw text standing. This one property
+    /// is where the review threshold is applied to a matched field.
     /// </summary>
-    [JsonPropertyName("matched_id")]
-    public int? MatchedId { get; set; }
+    public MatchResult? Accepted => RequiresManualReview ? null : Best;
+
+    /// <summary>True when OCR itself was unsure, independently of how the match scored.</summary>
+    public bool IsLowConfidence =>
+        !string.IsNullOrWhiteSpace(OriginalValue)
+        && OcrConfidence < ExtractionThresholds.Review;
+}
+
+/// <summary>The confidence floor, shared by both halves of the contract.</summary>
+public static class ExtractionThresholds
+{
+    /// <summary>
+    /// Below this, a match is likelier wrong than right and the raw reading stands for the
+    /// user to resolve. The same 0.75 the service documents; it applies to OCR confidence
+    /// and to match scores alike, so the screen has one number to highlight against.
+    /// </summary>
+    public const double Review = 0.75;
+}
+
+/// <summary>One line of the item table.</summary>
+public sealed class ProductRow
+{
+    [JsonPropertyName("product_name")]
+    public MatchedField? ProductName { get; set; }
 
     /// <summary>
-    /// The specific name that scored the match — the alias rather than the canonical
-    /// name when the invoice was printed with an alias.
+    /// A whole number by the service's normalization rules: a separator inside a
+    /// handwritten quantity is a mis-read stroke, not a decimal point.
     /// </summary>
-    [JsonPropertyName("matched_name")]
-    public string? MatchedName { get; set; }
-
-    [JsonPropertyName("match_score")]
-    public double? MatchScore { get; set; }
-
-    /// <summary>
-    /// Up to five ranked alternatives, best first. The verification screen pre-selects
-    /// the first in an editable combo box and offers the rest, so a near-miss costs one
-    /// click rather than a re-typed line.
-    /// </summary>
-    [JsonPropertyName("candidates")]
-    public List<MatchCandidate> Candidates { get; set; } = new();
-
-    /// <summary>
-    /// True when the top candidate was too weak to accept unseen — or when there was
-    /// none. These are the fields the screen highlights for the user to confirm.
-    /// </summary>
-    [JsonPropertyName("requires_manual_review")]
-    public bool RequiresManualReview { get; set; }
-
-    /// <summary>[x1, y1, x2, y2] in preprocessed-image pixel space, or null.</summary>
-    [JsonPropertyName("bbox")]
-    public int[]? BoundingBox { get; set; }
+    [JsonPropertyName("quantity")] public ValueField<int?>? Quantity { get; set; }
+    [JsonPropertyName("unit_price")] public ValueField<decimal?>? UnitPrice { get; set; }
+    [JsonPropertyName("total_price")] public ValueField<decimal?>? TotalPrice { get; set; }
 }
 
 public sealed class ExtractionSource
@@ -103,110 +169,113 @@ public sealed class ExtractionSource
     [JsonPropertyName("filename")] public string? Filename { get; set; }
     [JsonPropertyName("page_count")] public int PageCount { get; set; }
     [JsonPropertyName("page_used")] public int PageUsed { get; set; }
+
+    /// <summary>The corrected page's size, and the space every box is measured in.</summary>
     [JsonPropertyName("width")] public int Width { get; set; }
     [JsonPropertyName("height")] public int Height { get; set; }
 }
 
-public sealed class ExtractedHeader
-{
-    [JsonPropertyName("merchant_name")] public ExtractedField<string>? MerchantName { get; set; }
-    [JsonPropertyName("invoice_number")] public ExtractedField<string>? InvoiceNumber { get; set; }
-    [JsonPropertyName("invoice_date")] public ExtractedField<string>? InvoiceDate { get; set; }
-    [JsonPropertyName("city")] public ExtractedField<string>? City { get; set; }
-    [JsonPropertyName("total_amount")] public ExtractedField<decimal>? TotalAmount { get; set; }
-}
-
-public sealed class ExtractedLineItem
-{
-    [JsonPropertyName("row_index")] public int RowIndex { get; set; }
-    [JsonPropertyName("product_name")] public ExtractedField<string>? ProductName { get; set; }
-
-    /// <summary>
-    /// A whole number by the service's normalization rules: a separator inside a
-    /// handwritten quantity is a mis-read stroke, not a decimal point.
-    /// </summary>
-    [JsonPropertyName("quantity")] public ExtractedField<decimal>? Quantity { get; set; }
-    [JsonPropertyName("unit_price")] public ExtractedField<decimal>? UnitPrice { get; set; }
-    [JsonPropertyName("total_price")] public ExtractedField<decimal>? TotalPrice { get; set; }
-
-    /// <summary>
-    /// The service's own arithmetic check. Advisory only — the C# side re-validates
-    /// independently via IInvoiceValidationService and does not trust this flag.
-    /// </summary>
-    [JsonPropertyName("arithmetic_ok")] public bool ArithmeticOk { get; set; }
-}
-
-public sealed class ExtractionWarning
-{
-    [JsonPropertyName("code")] public string? Code { get; set; }
-    [JsonPropertyName("field")] public string? Field { get; set; }
-    [JsonPropertyName("message")] public string? Message { get; set; }
-}
-
 /// <summary>
-/// One box on the page, for the overlay on the verification screen. Everything the OCR
-/// engine found appears here, including text no invoice field claimed.
+/// The whole 200 body. These properties and no others — there is no request id, no
+/// warnings array, no raw OCR dump and no overlay element list.
 /// </summary>
-public sealed class OverlayElement
-{
-    [JsonPropertyName("id")] public string? Id { get; set; }
-
-    /// <summary>"table_cell" or "free_field".</summary>
-    [JsonPropertyName("kind")] public string? Kind { get; set; }
-
-    /// <summary>[x1, y1, x2, y2] in preprocessed-image pixel space.</summary>
-    [JsonPropertyName("bbox")] public int[]? BoundingBox { get; set; }
-
-    [JsonPropertyName("raw_text")] public string? RawText { get; set; }
-    [JsonPropertyName("corrected_text")] public string? CorrectedText { get; set; }
-    [JsonPropertyName("confidence")] public double Confidence { get; set; }
-    [JsonPropertyName("candidates")] public List<MatchCandidate> Candidates { get; set; } = new();
-    [JsonPropertyName("editable")] public bool Editable { get; set; } = true;
-
-    [JsonPropertyName("table_id")] public string? TableId { get; set; }
-    [JsonPropertyName("row")] public int? Row { get; set; }
-    [JsonPropertyName("col")] public int? Column { get; set; }
-}
-
+/// <remarks>
+/// Warnings are computed here rather than sent: every input for them is already in this
+/// body, and two sides deriving the same warning from the same numbers is one side too
+/// many. See <c>Services/Validation/ExtractionWarningBuilder.cs</c>.
+/// </remarks>
 public sealed class ExtractionResult
 {
-    [JsonPropertyName("request_id")] public string? RequestId { get; set; }
     [JsonPropertyName("processing_ms")] public long ProcessingMs { get; set; }
     [JsonPropertyName("source")] public ExtractionSource? Source { get; set; }
-    [JsonPropertyName("header")] public ExtractedHeader? Header { get; set; }
-    [JsonPropertyName("line_items")] public List<ExtractedLineItem> LineItems { get; set; } = new();
-    [JsonPropertyName("warnings")] public List<ExtractionWarning> Warnings { get; set; } = new();
-    [JsonPropertyName("raw_text")] public string? RawText { get; set; }
 
-    /// <summary>The pipeline's own id for this run, and the folder name under its
-    /// results directory. Useful when reporting a bad extraction to the AI team.</summary>
-    [JsonPropertyName("invoice_id")] public string? InvoiceId { get; set; }
+    /// <summary>
+    /// The invoice number printed on the paper — <b>not</b> the pipeline's own id for the
+    /// run, which is never sent.
+    /// </summary>
+    [JsonPropertyName("invoice_id")] public ValueField<string?>? InvoiceId { get; set; }
 
-    /// <summary>Which engine actually read the page, as opposed to which was configured.</summary>
-    [JsonPropertyName("ocr_engine")] public string? OcrEngine { get; set; }
+    [JsonPropertyName("customer_name")] public MatchedField? CustomerName { get; set; }
+    [JsonPropertyName("date")] public ValueField<string?>? Date { get; set; }
+    [JsonPropertyName("city")] public MatchedField? City { get; set; }
+    [JsonPropertyName("products")] public List<ProductRow> Products { get; set; } = new();
 
-    /// <summary>Every detected box, for the image overlay.</summary>
-    [JsonPropertyName("elements")] public List<OverlayElement> Elements { get; set; } = new();
+    [JsonPropertyName("total_invoice_price")]
+    public ValueField<decimal?>? TotalInvoicePrice { get; set; }
 
     /// <summary>
     /// Base64 PNG of the enhanced grayscale page — the preprocessing output just before
     /// binarization. Null unless <see cref="ExtractionOptions.ReturnDebugImages"/> was set.
     /// Downscaled to the service's debug_image_max_width, so
-    /// <see cref="ExtractedField{T}.BoundingBox"/> coordinates do not map onto it 1:1.
+    /// <see cref="BoundingBox"/> coordinates do not map onto it 1:1.
     /// </summary>
     [JsonPropertyName("enhanced_image_png")] public string? EnhancedImagePng { get; set; }
 
     /// <summary>
-    /// Base64 PNG of the exact image the OCR engine read (binarized). Same nullability and
-    /// downscaling caveats as <see cref="EnhancedImagePng"/>.
+    /// Base64 PNG of the exact image the OCR engine read. Same nullability and downscaling
+    /// caveats as <see cref="EnhancedImagePng"/>.
     /// </summary>
     [JsonPropertyName("ocr_input_image_png")] public string? OcrInputImagePng { get; set; }
+
+    /// <summary>
+    /// Every matched field on the page — the two header fields plus one per product row.
+    /// The warning builder and the status line both walk this rather than repeating the
+    /// list of which fields happen to be matched ones.
+    /// </summary>
+    public IEnumerable<(string Field, MatchedField Value)> MatchedFields()
+    {
+        if (CustomerName is { } customer) yield return (nameof(CustomerName), customer);
+        if (City is { } city) yield return (nameof(City), city);
+
+        for (var i = 0; i < Products.Count; i++)
+        {
+            if (Products[i].ProductName is { } name)
+                yield return ($"{nameof(Products)}[{i}].{nameof(ProductRow.ProductName)}", name);
+        }
+    }
+
+    /// <summary>
+    /// What the paper said, assembled from every field's own reading. Replaces the raw OCR
+    /// dump the service used to send: the same text, attributed to the fields it came from
+    /// instead of run together into one blob.
+    /// </summary>
+    public string DetectedText()
+    {
+        var lines = new List<string?>
+        {
+            InvoiceId?.Value,
+            CustomerName?.OriginalValue,
+            Date?.Value,
+            City?.OriginalValue
+        };
+
+        lines.AddRange(Products.Select(p => string.Join("  ", new[]
+        {
+            p.ProductName?.OriginalValue,
+            Text(p.Quantity?.Value),
+            Text(p.UnitPrice?.Value),
+            Text(p.TotalPrice?.Value)
+        }.Where(part => !string.IsNullOrWhiteSpace(part)))));
+
+        lines.Add(Text(TotalInvoicePrice?.Value));
+
+        return string.Join("\n", lines.Where(line => !string.IsNullOrWhiteSpace(line)));
+    }
+
+    /// <summary>
+    /// Invariant text for a number that may not have been read at all. Invariant because
+    /// this is a diagnostic view of what the page said, not a value the user edits — and
+    /// the app's thread culture is Arabic, which would render the digits Arabic-Indic and
+    /// undo the folding the service just did.
+    /// </summary>
+    private static string? Text<T>(T? value) where T : struct, IFormattable =>
+        value?.ToString(null, System.Globalization.CultureInfo.InvariantCulture);
 }
 
 /// <summary>
 /// One contact from the Customers table, sent as a match target. <see cref="Name"/> and
 /// every entry in <see cref="Aliases"/> are equivalent names: a hit on any of them
-/// identifies this record, and the service answers with <see cref="Name"/> plus
+/// identifies this record, and the service answers with <see cref="Name"/> plus the
 /// <see cref="CustomerId"/>.
 /// </summary>
 public sealed class KnownMerchant
@@ -242,15 +311,19 @@ public sealed class KnownCity
     [JsonPropertyName("aliases")] public List<string> Aliases { get; set; } = new();
 }
 
-/// <summary>Options sent alongside the file upload. All fields are optional server-side.</summary>
+/// <summary>
+/// The <c>options</c> part of an extract request: what this batch is being matched
+/// against. The pipeline configuration travels as its own <c>config</c> part, because the
+/// two are owned by different screens and change on different schedules.
+/// </summary>
+/// <remarks>
+/// There is no Languages and no InvoiceType. The pipeline is Arabic-primary — every prompt
+/// and keyword list in it is written for Arabic — so a language list changed nothing; and
+/// whether an invoice is a sale or a purchase is a property of the record this app files,
+/// not of the paper being read.
+/// </remarks>
 public sealed class ExtractionOptions
 {
-    [JsonPropertyName("languages")]
-    public List<string> Languages { get; set; } = new() { "ar", "en" };
-
-    [JsonPropertyName("invoice_type")]
-    public string? InvoiceType { get; set; }
-
     /// <summary>
     /// The Customers table as match targets, each carrying its full set of equivalent
     /// names (Name plus AliasName) so the service can match either and still answer with
@@ -273,14 +346,6 @@ public sealed class ExtractionOptions
 
     [JsonPropertyName("return_debug_images")]
     public bool ReturnDebugImages { get; set; }
-
-    /// <summary>
-    /// The full pipeline configuration, per docs/settings-config-contract.md. Null means
-    /// "use the service's own defaults", which is what an installation that has never
-    /// opened the settings page sends.
-    /// </summary>
-    [JsonPropertyName("configuration")]
-    public PipelineConfiguration? Configuration { get; set; }
 }
 
 public sealed class HealthStatus

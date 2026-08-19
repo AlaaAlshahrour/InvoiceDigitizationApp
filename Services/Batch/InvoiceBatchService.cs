@@ -87,6 +87,7 @@ public sealed class InvoiceBatchService : IInvoiceBatchService
     public async Task StartAsync(
         IReadOnlyList<string> paths,
         ExtractionOptions options,
+        PipelineConfiguration? config,
         IProgress<BatchProgress>? progress,
         CancellationToken ct = default)
     {
@@ -143,7 +144,8 @@ public sealed class InvoiceBatchService : IInvoiceBatchService
 
                 try
                 {
-                    await ProcessOneAsync(item, options, directory, token).ConfigureAwait(false);
+                    await ProcessOneAsync(item, options, config, directory, token)
+                        .ConfigureAwait(false);
                     item.State = BatchItemState.Ready;
                 }
                 catch (OperationCanceledException)
@@ -195,13 +197,18 @@ public sealed class InvoiceBatchService : IInvoiceBatchService
     /// base64 payloads. This last step is what bounds the batch's memory use.
     /// </summary>
     private async Task ProcessOneAsync(
-        BatchItem item, ExtractionOptions options, string directory, CancellationToken ct)
+        BatchItem item,
+        ExtractionOptions options,
+        PipelineConfiguration? config,
+        string directory,
+        CancellationToken ct)
     {
         item.ContentHash = await _duplicates
             .ComputeFileHashAsync(item.SourcePath, ct).ConfigureAwait(false);
 
         var client = _clientFactory();
-        var result = await client.ExtractAsync(item.SourcePath, options, ct).ConfigureAwait(false);
+        var result = await client
+            .ExtractAsync(item.SourcePath, options, config, ct).ConfigureAwait(false);
 
         item.EnhancedImagePath = await WriteImageAsync(
             result.EnhancedImagePng, directory, $"{item.Stem}_enh.png").ConfigureAwait(false);

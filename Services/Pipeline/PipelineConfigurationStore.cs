@@ -99,6 +99,13 @@ public sealed class PipelineConfigurationStore : IPipelineConfigurationStore
     /// The contract's documented defaults, used when the service cannot be reached. The
     /// settings page has to open on something even with the service down.
     /// </summary>
+    /// <remarks>
+    /// These mirror <c>Invoice-Extraction-pipeline/config/default_config.yaml</c>:
+    /// layout_driven + contour_based + bill_layout + padded_crop + qwen, the combination
+    /// that actually reads this project's handwritten invoices. The first entry of each
+    /// catalog list is the recommended one, so ordering the catalog is what sets the
+    /// defaults rather than a second list of names here.
+    /// </remarks>
     public static PipelineConfiguration BuildDefault()
     {
         var configuration = new PipelineConfiguration();
@@ -109,32 +116,46 @@ public sealed class PipelineConfigurationStore : IPipelineConfigurationStore
 
             configuration.Preprocessing.Set(definition.Key, new PipelineStep
             {
-                Enabled = true,
+                // The photometric steps the Qwen recognizer reads better without are
+                // disabled, matching the service's own file: thresholding a handwritten
+                // stroke is what breaks it into pieces.
+                Enabled = !DisabledByDefault.Contains(definition.Key),
                 Algorithm = algorithm.Name,
                 Params = DefaultParams(algorithm)
             });
         }
 
+        configuration.Flow = new FlowConfiguration
+        {
+            Name = PipelineCatalog.Flows[0].Name
+        };
+
+        // No engine: under layout_driven nothing consults one, and setting it anyway
+        // would leave a value the UI shows and the service ignores.
         configuration.Ocr = new OcrConfiguration
         {
-            Engine = "tesseract",
-            EngineParams = DefaultParams(PipelineCatalog.OcrEngines[0])
+            Engine = null,
+            Cropper = Component(PipelineCatalog.Croppers[0]),
+            Recognizer = Component(PipelineCatalog.Recognizers[0])
         };
 
         configuration.TableExtraction = new TableExtractionConfiguration
         {
-            Extractor = "grid_line",
-            ExtractorParams = DefaultParams(PipelineCatalog.TableExtractors[0])
+            Extractor = PipelineCatalog.TableExtractors[0].Name,
+            ExtractorParams = DefaultParams(PipelineCatalog.TableExtractors[0]),
+            Classifier = PipelineCatalog.TableClassifiers[0].Name,
+            ClassifierParams = DefaultParams(PipelineCatalog.TableClassifiers[0])
         };
 
         configuration.StringMatching = new StringMatchingConfiguration
         {
-            Algorithm = "levenshtein",
+            Algorithm = PipelineCatalog.StringMatchers[0].Name,
             AlgorithmParams = DefaultParams(PipelineCatalog.StringMatchers[0]),
             DictionaryPath = "keywords/ar_invoice_terms.json"
         };
 
-        configuration.Output = new OutputConfiguration { Formatter = "ui_overlay_json" };
+        // Forced by the service on every request; round-tripped, never edited.
+        configuration.Output = new OutputConfiguration { Formatter = "invoice_json" };
 
         configuration.Persistence = new PersistenceConfiguration
         {
@@ -144,6 +165,21 @@ public sealed class PipelineConfigurationStore : IPipelineConfigurationStore
 
         return configuration;
     }
+
+    /// <summary>
+    /// Preprocessing steps the shipped configuration ships switched off. They keep their
+    /// parameters so turning one back on is a toggle rather than an edit.
+    /// </summary>
+    private static readonly HashSet<string> DisabledByDefault = new()
+    {
+        "contrast_enhancement", "denoising", "thresholding", "morphological_cleanup"
+    };
+
+    private static ComponentConfiguration Component(PipelineAlgorithm algorithm) => new()
+    {
+        Name = algorithm.Name,
+        Params = DefaultParams(algorithm)
+    };
 
     /// <summary>Every parameter of <paramref name="algorithm"/> at its documented default.</summary>
     public static Dictionary<string, JsonNode?> DefaultParams(PipelineAlgorithm algorithm)

@@ -45,7 +45,10 @@ public sealed class HttpAiServiceClient : IAiServiceClient
     }
 
     public async Task<ExtractionResult> ExtractAsync(
-        string filePath, ExtractionOptions options, CancellationToken ct = default)
+        string filePath,
+        ExtractionOptions options,
+        PipelineConfiguration? config,
+        CancellationToken ct = default)
     {
         if (!File.Exists(filePath))
         {
@@ -70,6 +73,16 @@ public sealed class HttpAiServiceClient : IAiServiceClient
 
         var optionsJson = JsonSerializer.Serialize(options, JsonOptions);
         content.Add(new StringContent(optionsJson, Encoding.UTF8, "application/json"), "options");
+
+        // Its own part, not a field inside `options`. Omitting it entirely is meaningful:
+        // it tells the service to run its own defaults, which is what an installation that
+        // has never opened the settings page should do.
+        if (config is not null)
+        {
+            var configJson = JsonSerializer.Serialize(config, JsonOptions);
+            content.Add(
+                new StringContent(configJson, Encoding.UTF8, "application/json"), "config");
+        }
 
         HttpResponseMessage response;
         try

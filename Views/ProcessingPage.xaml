@@ -147,21 +147,37 @@
             </Grid>
         </Border>
 
-        <!-- Validation summary -->
+        <!--
+          Validation summary.
+
+          The list is capped and scrolls. Validation emits one message per failing row, so
+          a bad extraction produces as many warnings as there are line items, and this row
+          is Auto-sized: left to grow, the banner alone pushed the form and the image pane
+          off the bottom of the window. The cap keeps the screen's proportions fixed no
+          matter how many messages there are, and the count moves into the title so a
+          scrolled-off remainder is still accounted for.
+        -->
         <InfoBar
             Grid.Row="3"
             IsOpen="{x:Bind ViewModel.HasValidationMessages, Mode=OneWay}"
             Severity="Warning"
             IsClosable="False"
-            Title="تحقق من هذه العناصر قبل الحفظ">
+            Title="{x:Bind ViewModel.ValidationSummaryTitle, Mode=OneWay}">
             <InfoBar.Content>
-                <ItemsControl ItemsSource="{x:Bind ViewModel.ValidationMessages}" Margin="0,4,0,8">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <TextBlock Text="{Binding}" TextWrapping="Wrap" Margin="0,2" />
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                <ScrollViewer MaxHeight="132"
+                              Margin="0,4,0,8"
+                              VerticalScrollMode="Enabled"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollMode="Disabled"
+                              HorizontalScrollBarVisibility="Disabled">
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.ValidationMessages}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" TextWrapping="Wrap" Margin="0,2" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
             </InfoBar.Content>
         </InfoBar>
 
@@ -490,9 +506,35 @@
                                      Checked="OcrView_Checked" />
                     </StackPanel>
 
-                    <!-- Zoom controls -->
+                    <!--
+                      Tools + zoom.
+
+                      The two tools follow the same shape as the rendering picker above —
+                      individual RadioButtons sharing a GroupName, bound one way and pushed
+                      back through Checked — for the same reasons.
+
+                      MinWidth is zeroed because a RadioButton's default is wide enough to
+                      push the zoom controls off a narrow pane.
+                    -->
                     <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="4" Padding="8"
                                 Background="{ThemeResource LayerFillColorDefaultBrush}">
+                        <RadioButton GroupName="InvoiceImageTools"
+                                     Content="تحريك"
+                                     MinWidth="0" VerticalAlignment="Center"
+                                     ToolTipService.ToolTip="اسحب الصورة بزر الماوس الأيسر للتنقل فيها بحرية"
+                                     IsChecked="{x:Bind IsPanTool(ViewModel.SelectedImageTool), Mode=OneWay}"
+                                     Checked="PanTool_Checked" />
+
+                        <RadioButton GroupName="InvoiceImageTools"
+                                     Content="تحديد"
+                                     MinWidth="0" VerticalAlignment="Center"
+                                     ToolTipService.ToolTip="ارسم مستطيلًا حول جزء من الفاتورة لتكبيره"
+                                     IsChecked="{x:Bind IsMarqueeTool(ViewModel.SelectedImageTool), Mode=OneWay}"
+                                     Checked="MarqueeTool_Checked" />
+
+                        <Border Width="1" Margin="4,2"
+                                Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
                         <Button Command="{x:Bind ViewModel.ZoomOutCommand}" ToolTipService.ToolTip="تصغير">
                             <FontIcon Glyph="&#xE71F;" FontSize="14" />
                         </Button>
@@ -504,10 +546,20 @@
                                    Text="{x:Bind ZoomLabel(ViewModel.ZoomFactor), Mode=OneWay}" />
                     </StackPanel>
 
-                    <!-- Pan + zoom surface -->
+                    <!--
+                      Pan + zoom surface.
+
+                      Deliberately left-to-right inside an otherwise right-to-left page. A
+                      mirrored ScrollViewer mirrors both its offsets and the pointer
+                      coordinates the drag handlers read, and the two are easy to get out
+                      of step; an image is not text and gains nothing from the mirroring.
+                      Pinning it here means the pan arithmetic in the code-behind, and the
+                      marquee overlay's Canvas coordinates, are in one plain space.
+                    -->
                     <ScrollViewer
                         x:Name="ImageScroller"
                         Grid.Row="2"
+                        FlowDirection="LeftToRight"
                         ZoomMode="Enabled"
                         HorizontalScrollMode="Enabled"
                         VerticalScrollMode="Enabled"
@@ -515,10 +567,32 @@
                         VerticalScrollBarVisibility="Auto"
                         MinZoomFactor="0.1"
                         MaxZoomFactor="8"
+                        ViewChanged="ImageScroller_ViewChanged"
                         Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
 
                         <Image x:Name="InvoiceImage" Stretch="Uniform" />
                     </ScrollViewer>
+
+                    <!--
+                      Marquee overlay.
+
+                      Sits on top of the scroller in the same cell and shares its flow
+                      direction, so a pointer position taken relative to the scroller is
+                      already this Canvas's coordinate. IsHitTestVisible is off: the drag
+                      that draws this rectangle is being handled by the scroller
+                      underneath, and an overlay that took the pointer would also swallow
+                      the wheel.
+                    -->
+                    <Canvas x:Name="MarqueeLayer" Grid.Row="2"
+                            FlowDirection="LeftToRight"
+                            IsHitTestVisible="False">
+                        <Rectangle x:Name="MarqueeRect"
+                                   Visibility="Collapsed"
+                                   Fill="#332F6FE4"
+                                   Stroke="#FF2F6FE4"
+                                   StrokeThickness="1"
+                                   StrokeDashArray="4,3" />
+                    </Canvas>
 
                     <!-- Placeholder before a file is opened -->
                     <StackPanel Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center"

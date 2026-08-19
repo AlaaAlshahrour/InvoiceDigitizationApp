@@ -65,6 +65,34 @@ public partial class App : Application
 
         _window = new MainWindow();
         _window.Activate();
+
+        // Fire-and-forget on purpose: the service takes the better part of a minute to
+        // load its model weights, and the app is fully usable for manual entry and for
+        // reviewing saved invoices while it does. Blocking here would hold the window
+        // closed for a service the user may not even be about to use.
+        _ = StartExtractionServiceAsync();
+    }
+
+    /// <summary>
+    /// Starts the Python extraction service if the user asked for it, and stops it again
+    /// when the window closes.
+    /// </summary>
+    private async Task StartExtractionServiceAsync()
+    {
+        var launcher = Services.GetRequiredService<IPythonServiceLauncher>();
+
+        if (_window is not null) _window.Closed += (_, _) => launcher.Stop();
+
+        try
+        {
+            await launcher.EnsureRunningAsync();
+        }
+        catch (Exception ex)
+        {
+            // Never fatal. Without the service the app still opens every screen and saves
+            // hand-entered invoices; the health probe already says it is unreachable.
+            System.Diagnostics.Debug.WriteLine($"Extraction service did not start: {ex}");
+        }
     }
 
     private static ServiceProvider ConfigureServices()
@@ -85,6 +113,10 @@ public partial class App : Application
         services.AddSingleton<IInvoiceValidationService, InvoiceValidationService>();
         services.AddSingleton<IDuplicateDetectionService, DuplicateDetectionService>();
         services.AddSingleton<IExportService, ExportService>();
+
+        // Derives the extraction's warnings here rather than trusting a copy from the
+        // service — see docs/api-contract.md, "Warnings".
+        services.AddSingleton<IExtractionWarningBuilder, ExtractionWarningBuilder>();
 
         // OCR on a large scan can legitimately take a while; the default 100s would
         // abort a valid request on a slower machine.
@@ -108,6 +140,10 @@ public partial class App : Application
         // Transient, because it resolves IAiServiceClient — which the HTTP factory
         // rotates — to read the service's defaults.
         services.AddTransient<IPipelineConfigurationStore, PipelineConfigurationStore>();
+
+        // Singleton: it owns the process handle, and a second instance would start a
+        // second service against the same port.
+        services.AddSingleton<IPythonServiceLauncher, PythonServiceLauncher>();
 
         // ---- view models ---------------------------------------------------
         // Transient: each navigation gets a clean screen with no leftover state.

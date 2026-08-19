@@ -115,9 +115,16 @@ public interface IInvoiceBatchService
     /// Processes <paramref name="paths"/> strictly one at a time, in order. Returns when
     /// the last item finishes or cancellation takes effect.
     /// </summary>
+    /// <param name="config">
+    /// The pipeline configuration to run every file under, or null for the service's own
+    /// defaults. Fixed for the whole batch on purpose: a settings change mid-batch would
+    /// leave half the invoices extracted one way and half another, with nothing in the
+    /// result to say which.
+    /// </param>
     Task StartAsync(
         IReadOnlyList<string> paths,
         ExtractionOptions options,
+        PipelineConfiguration? config,
         IProgress<BatchProgress>? progress,
         CancellationToken ct = default);
 

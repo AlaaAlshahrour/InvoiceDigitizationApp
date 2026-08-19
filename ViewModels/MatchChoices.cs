@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using InvoiceDigitizationApp.Helpers;
 using InvoiceDigitizationApp.Models;
 using InvoiceDigitizationApp.Services.AiServiceClient;
 
@@ -10,13 +9,13 @@ namespace InvoiceDigitizationApp.ViewModels;
 
 /// <summary>
 /// One entry in a match picker: a catalog record, and how well the OCR text scored
-/// against it when it came from the ranked candidate list.
+/// against it when it came from the service's ranked results.
 /// </summary>
 /// <remarks>
 /// The pickers put the suggestions at the top with their scores and the rest of the
 /// catalog underneath, so the user confirms a correct read without scrolling and
 /// corrects a wrong one from a short list — which is the whole point of returning five
-/// candidates rather than one answer.
+/// results rather than one answer.
 /// </remarks>
 public sealed class CustomerChoice
 {
@@ -58,40 +57,33 @@ public sealed class ProductChoice
 }
 
 /// <summary>
-/// Builds the ordered picker lists: the service's ranked candidates first, then the rest
-/// of the catalog.
+/// Builds the ordered picker lists: the service's ranked results first, then the rest of
+/// the catalog in its own order.
 /// </summary>
 /// <remarks>
-/// The local fallback drops zero-scoring entries. A suggestion is a claim that something
-/// resembles what was read; offering "حذاء جلد أسود (0%)" at the top of the list for a
-/// line that says "منتج" is worse than offering nothing, because it puts an unrelated
-/// product one careless click away from being saved.
+/// There is no local fallback matcher any more. The app used to re-rank the catalog itself
+/// when the service returned nothing — with its own copies of the normalization and
+/// similarity rules, which could and did drift from the service's. Two implementations of
+/// "the same string" meant the suggestion a user saw depended on which side had computed
+/// it, and the disagreement was invisible until a merchant the service had matched came
+/// back unmatched in the app. When there are no results, the picker is simply the catalog,
+/// which is honest about the app having nothing to suggest.
 /// </remarks>
 public static class MatchChoiceBuilder
 {
+    /// <summary>How many ranked alternatives a picker shows by default.</summary>
+    public const int DefaultTopK = 5;
+
     /// <summary>
     /// Suggestions first, in the order the service ranked them, then every other contact
-    /// in catalog order. Falls back to matching locally when the service sent no
-    /// candidates — which is what happens when the user has added a contact since the
-    /// extraction ran.
+    /// in catalog order.
     /// </summary>
     public static IReadOnlyList<CustomerChoice> ForCustomers(
         IEnumerable<Customer> catalog,
-        IReadOnlyList<MatchCandidate>? candidates,
-        string? ocrText,
-        int topK)
+        IReadOnlyList<MatchResult>? results)
     {
         var customers = catalog.ToList();
-        var ranked = Resolve(customers, candidates, c => c.CustomerId, c => c.Name);
-
-        if (ranked.Count == 0 && !string.IsNullOrWhiteSpace(ocrText))
-        {
-            ranked = CatalogMatcher.RankCustomers(ocrText, customers, topK)
-                .Where(match => match.Score > 0)
-                .Select(match => (match.Customer, match.Score * 100.0))
-                .ToList();
-        }
-
+        var ranked = Resolve(customers, results, c => c.CustomerId, c => c.Name);
         var suggested = ranked.Select(entry => entry.Item1.CustomerId).ToHashSet();
 
         return ranked
@@ -104,21 +96,10 @@ public static class MatchChoiceBuilder
 
     public static IReadOnlyList<ProductChoice> ForProducts(
         IEnumerable<Product> catalog,
-        IReadOnlyList<MatchCandidate>? candidates,
-        string? ocrText,
-        int topK)
+        IReadOnlyList<MatchResult>? results)
     {
         var products = catalog.ToList();
-        var ranked = Resolve(products, candidates, p => p.ProductId, p => p.Name);
-
-        if (ranked.Count == 0 && !string.IsNullOrWhiteSpace(ocrText))
-        {
-            ranked = CatalogMatcher.RankProducts(ocrText, products, topK)
-                .Where(match => match.Score > 0)
-                .Select(match => (match.Product, match.Score * 100.0))
-                .ToList();
-        }
-
+        var ranked = Resolve(products, results, p => p.ProductId, p => p.Name);
         var suggested = ranked.Select(entry => entry.Item1.ProductId).ToHashSet();
 
         return ranked
@@ -130,33 +111,32 @@ public static class MatchChoiceBuilder
     }
 
     /// <summary>
-    /// Maps the service's candidates onto catalog rows, by id where the service supplied
-    /// one and by name otherwise. A candidate naming a record that no longer exists is
-    /// dropped rather than shown: the picker must only offer rows that can actually be
-    /// saved.
+    /// Maps the service's results onto catalog rows, by id where it supplied one and by
+    /// name otherwise. A result naming a record that no longer exists is dropped rather
+    /// than shown: the picker must only offer rows that can actually be saved.
     /// </summary>
     private static List<(T, double)> Resolve<T>(
         List<T> catalog,
-        IReadOnlyList<MatchCandidate>? candidates,
+        IReadOnlyList<MatchResult>? results,
         Func<T, int> idOf,
         Func<T, string> nameOf)
     {
         var resolved = new List<(T, double)>();
-        if (candidates is null) return resolved;
+        if (results is null) return resolved;
 
         var seen = new HashSet<int>();
 
-        foreach (var candidate in candidates)
+        foreach (var result in results)
         {
-            var match = candidate.MatchedId is { } id
+            var match = result.EntryId is { } id
                 ? catalog.FirstOrDefault(entry => idOf(entry) == id)
                 : catalog.FirstOrDefault(entry =>
-                    string.Equals(nameOf(entry), candidate.MatchedValue,
-                        StringComparison.OrdinalIgnoreCase));
+                    string.Equals(nameOf(entry), result.Value, StringComparison.OrdinalIgnoreCase));
 
             if (match is null || !seen.Add(idOf(match))) continue;
 
-            resolved.Add((match, candidate.SimilarityScore));
+            // The wire carries a 0–1 fraction; the picker shows a percentage.
+            resolved.Add((match, result.StringMatchingScore * 100.0));
         }
 
         return resolved;

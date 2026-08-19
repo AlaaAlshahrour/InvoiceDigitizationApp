@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
-using InvoiceDigitizationApp.Helpers;
 using InvoiceDigitizationApp.Models;
 using InvoiceDigitizationApp.Services.AiServiceClient;
 
@@ -23,9 +22,8 @@ public partial class InvoiceItemRowViewModel : ObservableObject
         InvoiceItem item,
         ObservableCollection<Product> productCatalog,
         double confidence = 1.0,
-        IReadOnlyList<MatchCandidate>? candidates = null,
-        bool requiresManualReview = false,
-        int topK = CatalogMatcher.DefaultTopK)
+        IReadOnlyList<MatchResult>? results = null,
+        bool requiresManualReview = false)
     {
         ProductCatalog = productCatalog;
         RequiresManualReview = requiresManualReview;
@@ -43,11 +41,10 @@ public partial class InvoiceItemRowViewModel : ObservableObject
         Confidence = confidence;
         DetectedProductName = item.ProductName;
 
-        _candidates = candidates;
-        _topK = topK;
+        _results = results;
 
-        // The service's ranked candidates first, then the rest of the catalog. Built
-        // before the selection below so the picker has something to select into.
+        // The service's ranked results first, then the rest of the catalog. Built before
+        // the selection below so the picker has something to select into.
         RebuildChoices();
 
         // A row arriving with an id is already catalog-backed; select it so the picker
@@ -75,15 +72,14 @@ public partial class InvoiceItemRowViewModel : ObservableObject
     public bool RequiresManualReview { get; }
 
     /// <summary>How many of <see cref="ProductChoices"/> came from the extraction.</summary>
+
     public int SuggestionCount => ProductChoices.Count(choice => choice.IsSuggestion);
 
     public bool HasSuggestions => SuggestionCount > 0;
 
-    /// <summary>The extraction's candidates, kept so the picker can be rebuilt when the
-    /// catalog changes without losing the ranking the service produced.</summary>
-    private readonly IReadOnlyList<MatchCandidate>? _candidates;
-
-    private readonly int _topK;
+    /// <summary>The extraction's ranked results, kept so the picker can be rebuilt when
+    /// the catalog changes without losing the ranking the service produced.</summary>
+    private readonly IReadOnlyList<MatchResult>? _results;
 
     /// <summary>
     /// Rebuilds the picker against the current catalog. Called when a product is added
@@ -98,8 +94,7 @@ public partial class InvoiceItemRowViewModel : ObservableObject
 
         ProductChoices.Clear();
 
-        foreach (var choice in MatchChoiceBuilder.ForProducts(
-                     ProductCatalog, _candidates, DetectedProductName, _topK))
+        foreach (var choice in MatchChoiceBuilder.ForProducts(ProductCatalog, _results))
         {
             ProductChoices.Add(choice);
         }
@@ -128,7 +123,7 @@ public partial class InvoiceItemRowViewModel : ObservableObject
     /// <summary>OCR confidence for this row; 1.0 for rows the user added by hand.</summary>
     public double Confidence { get; }
 
-    public bool IsLowConfidence => Confidence < 0.75;
+    public bool IsLowConfidence => Confidence < ExtractionThresholds.Review;
 
     /// <summary>
     /// What OCR read for this line, kept after the row is linked to a catalog product so

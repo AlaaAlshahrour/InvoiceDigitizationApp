@@ -281,9 +281,30 @@ public static class PipelineCatalog
     };
 
     /// <summary>
-    /// OCR engines the service can be asked for. `stub` is included deliberately: it
-    /// fabricates a deterministic invoice and is the only way to verify the desktop app
-    /// talks to the service correctly before a real engine is installed.
+    /// Which end-to-end reading strategy runs. Sits above the OCR section on the settings
+    /// page, because it decides which of that section's choices mean anything.
+    /// </summary>
+    public static IReadOnlyList<PipelineAlgorithm> Flows { get; } = new[]
+    {
+        new PipelineAlgorithm("layout_driven", "قراءة موجَّهة بالجدول (الموصى بها)",
+            Array.Empty<PipelineParameter>(),
+            "يُكتشف جدول الفاتورة المطبوع ويُصنَّف أولاً، ثم تُقرأ كل خانة معنونة بالمطالبة التي يقتضيها دورها. " +
+            "الجدول نفسه يحدّد حدود الأعمدة، فلا شيء يُصرَّح به يدويًا. لا يقرأ النص خارج الخانات المسطَّرة."),
+
+        new PipelineAlgorithm("detector_driven", "قراءة موجَّهة بكاشف النص",
+            Array.Empty<PipelineParameter>(),
+            "يبحث كاشف النص عن الحبر في أي موضع من الصفحة، ثم تُقوَّم المربّعات على حدود الأعمدة المصرَّح بها، " +
+            "فتُقتطع وتُقرأ. يقرأ النص خارج الخانات، لكنه يتطلّب تصريح حدود الأعمدة في ملف إعدادات الخدمة."),
+
+        new PipelineAlgorithm("single_engine", "محرك واحد للصفحة كاملة",
+            Array.Empty<PipelineParameter>(),
+            "محرك تعرّف ضوئي واحد يقرأ الصفحة كلها. مناسب للفواتير المطبوعة، وضعيف على الخط اليدوي.")
+    };
+
+    /// <summary>
+    /// OCR engines, for the <c>single_engine</c> flow only. `stub` is included
+    /// deliberately: it fabricates a deterministic invoice and is the only way to verify
+    /// the desktop app talks to the service correctly before a real engine is installed.
     /// </summary>
     public static IReadOnlyList<PipelineAlgorithm> OcrEngines { get; } = new[]
     {
@@ -293,22 +314,100 @@ public static class PipelineCatalog
                 ParameterKind.Choice, "ara",
                 Choices: new[] { "ara", "eng", "ara+eng" })
         },
-            "خفيف ولا يحتاج إلى نماذج، لكنه يتطلّب تثبيت برنامج Tesseract على الجهاز."),
+            "خفيف ولا يحتاج إلى نماذج، لكنه يتطلّب تثبيت برنامج Tesseract على الجهاز، ودقّته على الخط اليدوي ضعيفة."),
 
         new PipelineAlgorithm("surya", "Surya", Array.Empty<PipelineParameter>(),
             "يحتاج إلى تنزيل نماذج. دقّته على الخط العربي اليدوي محدودة."),
 
-        new PipelineAlgorithm("surya_qwen", "Surya + Qwen (هجين)",
-            Array.Empty<PipelineParameter>(),
-            "الأدقّ على الخط اليدوي، لكنه يتطلّب نماذج محلية وبيئة Python ثانية مُعدّة في ملف إعدادات الخدمة."),
+        new PipelineAlgorithm("easyocr", "EasyOCR", Array.Empty<PipelineParameter>(),
+            "يحتاج إلى تنزيل نماذج."),
+
+        new PipelineAlgorithm("qwen_vlm", "Qwen (صفحة كاملة)", Array.Empty<PipelineParameter>(),
+            "النموذج نفسه المستعمل في القراءة الموجَّهة، لكن على الصفحة كاملة بدل خانة خانة. " +
+            "القراءة خانةً بخانة أدقّ، فاستعمل «قراءة موجَّهة بالجدول» بدلاً منه."),
 
         new PipelineAlgorithm("stub", "محرك تجريبي (بيانات وهمية)",
             Array.Empty<PipelineParameter>(),
             "يولّد فاتورة وهمية ثابتة لاختبار الاتصال فقط. لا تستخدمه لفواتير حقيقية.")
     };
 
+    /// <summary>Finds the ink anywhere on the page. Built only under detector_driven.</summary>
+    public static IReadOnlyList<PipelineAlgorithm> Detectors { get; } = new[]
+    {
+        new PipelineAlgorithm("surya_detector", "كاشف Surya", new[]
+        {
+            new PipelineParameter("min_side", "أصغر ضلع معتبَر",
+                ParameterKind.Integer, 12, 1, 200,
+                "المربّعات الأصغر من هذا تُهمَل.")
+        })
+    };
+
+    /// <summary>
+    /// Squares the detector's boxes up against the declared column layout. Built only
+    /// under detector_driven.
+    /// </summary>
+    public static IReadOnlyList<PipelineAlgorithm> Refiners { get; } = new[]
+    {
+        new PipelineAlgorithm("column_fraction", "التقويم على حدود الأعمدة",
+            Array.Empty<PipelineParameter>(),
+            "يمدّ كل مربّع إلى حدود عموده. يتطلّب تصريح حدود الأعمدة في ملف إعدادات الخدمة."),
+
+        new PipelineAlgorithm("noop", "بلا تقويم", Array.Empty<PipelineParameter>(),
+            "يترك مربّعات الكاشف كما هي.")
+    };
+
+    /// <summary>
+    /// Cuts each region out of the page and prepares it for the recognizer. Shared by both
+    /// region-based flows.
+    /// </summary>
+    public static IReadOnlyList<PipelineAlgorithm> Croppers { get; } = new[]
+    {
+        new PipelineAlgorithm("padded_crop", "اقتطاع بهامش", new[]
+        {
+            new PipelineParameter("pad", "الهامش حول الخانة (بكسل)",
+                ParameterKind.Integer, 10, 0, 100,
+                "الاقتطاع الملاصق يقصّ أطراف الحروف فتُقرأ حروفًا أخرى."),
+            new PipelineParameter("upscale", "معامل التكبير",
+                ParameterKind.Integer, 2, 1, 8,
+                "القصاصات الصغيرة تُقرأ أفضل مكبَّرة."),
+            new PipelineParameter("min_side", "أصغر ضلع يُقرأ",
+                ParameterKind.Integer, 8, 1, 200,
+                "أصغر من هذا لا يحمل نصًا، وكل قصاصة تكلّف استدعاءً كاملاً للنموذج.")
+        })
+    };
+
+    /// <summary>
+    /// Reads one crop, prompted by the role its cell was classified as. Shared by both
+    /// region-based flows.
+    /// </summary>
+    public static IReadOnlyList<PipelineAlgorithm> Recognizers { get; } = new[]
+    {
+        new PipelineAlgorithm("qwen", "Qwen (نموذج بصري-لغوي)", new[]
+        {
+            new PipelineParameter("backend", "طريقة التشغيل",
+                ParameterKind.Choice, "subprocess",
+                Choices: new[] { "subprocess", "http", "transformers" },
+                Hint: "subprocess يشغّل النموذج في بيئة Python ثانية، وهو الوضع المعدّ في هذا التنصيب."),
+            new PipelineParameter("max_new_tokens", "أقصى عدد رموز للإجابة",
+                ParameterKind.Integer, 64, 1, 512,
+                "خانة الفاتورة قصيرة؛ رفع هذا يبطّئ القراءة بلا فائدة."),
+            new PipelineParameter("default_kind", "نوع المحتوى الافتراضي",
+                ParameterKind.Choice, "any",
+                Choices: new[] { "any", "number", "arabic_text", "date" },
+                Hint: "للخانات التي لم يصنّفها المحلّل. الخانة المصنَّفة تأخذ نوعها من دورها.")
+        },
+            "الأدقّ على الخط اليدوي. يتطلّب أوزان النموذج محليًا وبيئة Python ثانية معدّة في ملف إعدادات الخدمة."),
+
+        new PipelineAlgorithm("echo", "أداة تعرّف تجريبية", Array.Empty<PipelineParameter>(),
+            "تعيد نصًا ثابتًا لكل خانة. لاختبار الأنبوب بلا نماذج، لا لفواتير حقيقية.")
+    };
+
     public static IReadOnlyList<PipelineAlgorithm> TableExtractors { get; } = new[]
     {
+        new PipelineAlgorithm("contour_based", "استخراج بالمحيطات",
+            Array.Empty<PipelineParameter>(),
+            "يأخذ المناطق المغلقة مباشرةً، ويتعامل أفضل مع الخطوط المقطوعة والخط اليدوي الذي يعبرها."),
+
         new PipelineAlgorithm("grid_line", "استخراج بخطوط الجدول", new[]
         {
             new PipelineParameter("dot_bridge_scale", "جسر النقاط",
@@ -325,10 +424,39 @@ public static class PipelineCatalog
                 ParameterKind.Decimal, 0.5, 0.01, 1),
             new PipelineParameter("coverage_ratio", "نسبة التغطية",
                 ParameterKind.Decimal, 0.5, 0.01, 1)
-        }),
+        },
+            "يعيد بناء الشبكة من خطوطها، ويستخرج بنيتها بدقّة حين تكون الخطوط نظيفة.")
+    };
 
-        new PipelineAlgorithm("contour_based", "استخراج بالمحيطات",
-            Array.Empty<PipelineParameter>())
+    /// <summary>
+    /// What the detected boxes <i>mean</i>. Separate from the extractor because "find the
+    /// ruled regions" is the same problem for every form, while "the box above the table
+    /// is the invoice number" is knowledge of one supplier's printed form.
+    /// </summary>
+    /// <remarks>
+    /// `passthrough` leaves every role unknown, and the response's named fields are then
+    /// inferred from x-positions rather than read off labelled boxes — which is how a
+    /// column header ends up as the counterparty name. Its hint says so; it is offered
+    /// because a form no classifier covers is a real case, not because it is a reasonable
+    /// default.
+    /// </remarks>
+    public static IReadOnlyList<PipelineAlgorithm> TableClassifiers { get; } = new[]
+    {
+        new PipelineAlgorithm("bill_layout", "نموذج فاتورة المبيعات العربية", new[]
+        {
+            new PipelineParameter("table_row_count", "عدد صفوف الجدول",
+                ParameterKind.Integer, 10, 1, 60,
+                "عدد الصفوف المطبوعة على النموذج، لا عدد البنود المكتوبة فيه."),
+            new PipelineParameter("table_col_count", "عدد أعمدة الجدول",
+                ParameterKind.Integer, 6, 1, 20,
+                "يجب أن يطابق عدد الأدوار المصرَّح بها في ملف إعدادات الخدمة.")
+        },
+            "يعنون خانات نموذج فاتورة المبيعات العربية المعتاد: رقم الفاتورة والاسم والتاريخ والمدينة فوق الجدول، " +
+            "وأعمدة البنود داخله، وشريط الإجمالي تحته."),
+
+        new PipelineAlgorithm("passthrough", "بلا تصنيف", Array.Empty<PipelineParameter>(),
+            "لا يعنون شيئًا، فتبقى أدوار الخانات كلها مجهولة ويُستدلّ على الحقول من مواضعها الأفقية. " +
+            "هذا ما يجعل صفّ العناوين يُقرأ اسمًا للزبون. لا تستعمله إلا لنموذج لا يغطّيه أي مصنِّف.")
     };
 
     /// <summary>
@@ -353,6 +481,31 @@ public static class PipelineCatalog
         },
             "لأسماء المنتجات، حيث تكون الكلمات صحيحة لكن ترتيبها مختلف.")
     };
+
+    /// <summary>
+    /// Which OCR stage keys a flow actually uses. The settings page renders exactly these
+    /// and hides the rest, so the user never tunes a component the selected flow will not
+    /// build — and never leaves an engine set that nothing consults.
+    /// </summary>
+    public static IReadOnlyList<string> OcrStagesFor(string? flowName) => flowName switch
+    {
+        "single_engine" => new[] { OcrStage },
+        "detector_driven" => new[] { DetectorStage, RefinerStage, CropperStage, RecognizerStage },
+        // layout_driven, and anything unrecognized: the default flow's two components.
+        _ => new[] { CropperStage, RecognizerStage }
+    };
+
+    // Stage keys, shared by the settings ViewModel's card builder and its collector so the
+    // two cannot drift apart on a spelling.
+    public const string FlowStage = "flow";
+    public const string OcrStage = "ocr";
+    public const string DetectorStage = "detector";
+    public const string RefinerStage = "refiner";
+    public const string CropperStage = "cropper";
+    public const string RecognizerStage = "recognizer";
+    public const string TableExtractionStage = "table_extraction";
+    public const string TableClassifierStage = "table_classifier";
+    public const string StringMatchingStage = "string_matching";
 
     public static PipelineStepDefinition StepFor(string key) =>
         Steps.First(step => step.Key == key);

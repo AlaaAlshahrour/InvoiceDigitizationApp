@@ -10,8 +10,18 @@ public interface IAiServiceClient
     /// Sends an image (JPG/JPEG/PNG) for extraction. Throws <see cref="AiServiceException"/> on
     /// any service-reported failure or transport error.
     /// </summary>
+    /// <param name="options">The catalogs and limits for this batch.</param>
+    /// <param name="config">
+    /// The saved pipeline configuration, or null to let the service run its own defaults —
+    /// which is what an installation that has never opened the settings page sends, and
+    /// the only way to get the service's current defaults rather than a copy frozen at
+    /// install time.
+    /// </param>
     Task<ExtractionResult> ExtractAsync(
-        string filePath, ExtractionOptions options, CancellationToken ct = default);
+        string filePath,
+        ExtractionOptions options,
+        PipelineConfiguration? config,
+        CancellationToken ct = default);
 
     /// <summary>Returns null when the service is unreachable, rather than throwing.</summary>
     Task<HealthStatus?> GetHealthAsync(CancellationToken ct = default);

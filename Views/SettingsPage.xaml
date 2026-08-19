@@ -237,6 +237,12 @@
                 <ItemsControl ItemsSource="{x:Bind ViewModel.Phases}"
                               ItemTemplate="{StaticResource PhaseTemplate}" />
 
+                <TextBlock Text="طريقة القراءة" Style="{StaticResource SectionHeaderStyle}" />
+                <TextBlock TextWrapping="Wrap" Opacity="0.7" FontSize="13"
+                           Text="كيف تُقرأ الصفحة. تغيير هذا الاختيار يبدّل مكوّنات التعرّف المعروضة تحته، لأن كل طريقة تبني مكوّنات مختلفة." />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.ReadingStrategy}"
+                              ItemTemplate="{StaticResource StepTemplate}" />
+
                 <TextBlock Text="التعرّف والمطابقة" Style="{StaticResource SectionHeaderStyle}" />
                 <ItemsControl ItemsSource="{x:Bind ViewModel.RecognitionStages}"
                               ItemTemplate="{StaticResource StepTemplate}" />

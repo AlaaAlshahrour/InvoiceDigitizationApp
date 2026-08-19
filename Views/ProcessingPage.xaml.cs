@@ -12,11 +12,14 @@ using InvoiceDigitizationApp.Services.Validation;
 using InvoiceDigitizationApp.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI;
+using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Navigation;
+using Windows.Foundation;
 using Windows.Storage.Streams;
 using Windows.UI;
 
@@ -32,6 +35,23 @@ public sealed partial class ProcessingPage : Page
     /// </summary>
     private bool _dialogOpen;
 
+    /// <summary>Pointer position where the current drag began, in ImageScroller space.</summary>
+    private Point _dragOrigin;
+
+    private bool _isPanning;
+    private bool _isMarqueeing;
+    private bool _pointerOverImage;
+
+    /// <summary>Scroll offsets when a pan began; every move is measured against these.</summary>
+    private double _panOriginHorizontal;
+    private double _panOriginVertical;
+
+    /// <summary>
+    /// Set while the view's own zoom is being copied into the ViewModel, so the
+    /// ViewModel's change notification does not turn around and re-apply it to the view.
+    /// </summary>
+    private bool _syncingZoomFromView;
+
     public ProcessingViewModel ViewModel { get; }
 
     public ProcessingPage()
@@ -41,6 +61,24 @@ public sealed partial class ProcessingPage : Page
 
         ViewModel.DuplicatesDetected += OnDuplicatesDetected;
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
+
+        // Attached here rather than in the markup, with handledEventsToo set: a
+        // ScrollViewer marks pointer events handled for its own manipulation logic, and a
+        // plain XAML event attribute on it never fires for the drags this screen needs.
+        ImageScroller.AddHandler(
+            PointerPressedEvent, new PointerEventHandler(ImageScroller_PointerPressed), true);
+        ImageScroller.AddHandler(
+            PointerMovedEvent, new PointerEventHandler(ImageScroller_PointerMoved), true);
+        ImageScroller.AddHandler(
+            PointerReleasedEvent, new PointerEventHandler(ImageScroller_PointerReleased), true);
+        ImageScroller.AddHandler(
+            PointerCaptureLostEvent, new PointerEventHandler(ImageScroller_PointerCaptureLost), true);
+        ImageScroller.AddHandler(
+            PointerEnteredEvent, new PointerEventHandler(ImageScroller_PointerEntered), true);
+        ImageScroller.AddHandler(
+            PointerExitedEvent, new PointerEventHandler(ImageScroller_PointerExited), true);
+
+        ApplyToolCursor();
     }
 
     protected override async void OnNavigatedTo(NavigationEventArgs e)
@@ -86,8 +124,16 @@ public sealed partial class ProcessingPage : Page
     private async void OnViewModelPropertyChanged(
         object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
+        // Skipped while the view is the one reporting a zoom it already applied —
+        // re-applying it here would drop the offsets that came with it.
         if (e.PropertyName == nameof(ViewModel.ZoomFactor))
-            ImageScroller.ChangeView(null, null, (float)ViewModel.ZoomFactor);
+        {
+            if (!_syncingZoomFromView)
+                ImageScroller.ChangeView(null, null, (float)ViewModel.ZoomFactor);
+        }
+
+        else if (e.PropertyName == nameof(ViewModel.SelectedImageTool))
+            ApplyToolCursor();
 
         // Follows the ViewModel's choice of rendering, so the toggle and the batch both
         // repaint the pane through one path.
@@ -117,6 +163,18 @@ public sealed partial class ProcessingPage : Page
 
     private void OcrView_Checked(object sender, RoutedEventArgs e) =>
         ViewModel.SelectedImageView = InvoiceImageView.OcrInput;
+
+    // ---- tool picker ------------------------------------------------------
+
+    public bool IsPanTool(InvoiceImageTool tool) => tool == InvoiceImageTool.Pan;
+
+    public bool IsMarqueeTool(InvoiceImageTool tool) => tool == InvoiceImageTool.Marquee;
+
+    private void PanTool_Checked(object sender, RoutedEventArgs e) =>
+        ViewModel.SelectedImageTool = InvoiceImageTool.Pan;
+
+    private void MarqueeTool_Checked(object sender, RoutedEventArgs e) =>
+        ViewModel.SelectedImageTool = InvoiceImageTool.Marquee;
 
     // ---- x:Bind helpers ---------------------------------------------------
 
@@ -172,6 +230,220 @@ public sealed partial class ProcessingPage : Page
             // A preview failure must not prevent verifying the extracted data.
             InvoiceImage.Source = null;
         }
+    }
+
+    // ---- image navigation -------------------------------------------------
+
+    /// <summary>
+    /// Starts a drag: a pan with the hand tool or the middle button, a marquee otherwise.
+    /// </summary>
+    /// <remarks>
+    /// A ScrollViewer pans on touch, on the wheel and by its scrollbars, but a mouse drag
+    /// does nothing at all — which on a zoomed-in invoice leaves the scrollbars as the
+    /// only way to reach the rest of the page. These handlers are that missing gesture.
+    /// </remarks>
+    private void ImageScroller_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (InvoiceImage.Source is null) return;
+
+        // Touch is left to the ScrollViewer's own manipulation, which already pans and
+        // pinch-zooms. A touch contact reports itself as a left button press, so without
+        // this guard both would run and the image would travel twice as far as the finger.
+        if (e.Pointer.PointerDeviceType == PointerDeviceType.Touch) return;
+
+        var point = e.GetCurrentPoint(ImageScroller);
+        var properties = point.Properties;
+
+        // Middle-drag pans under either tool: the marquee would otherwise have no way to
+        // move the view without switching back to the hand first.
+        var pan = properties.IsMiddleButtonPressed
+                  || (properties.IsLeftButtonPressed
+                      && ViewModel.SelectedImageTool == InvoiceImageTool.Pan);
+
+        var marquee = properties.IsLeftButtonPressed
+                      && ViewModel.SelectedImageTool == InvoiceImageTool.Marquee;
+
+        if (!pan && !marquee) return;
+
+        _dragOrigin = point.Position;
+
+        if (pan)
+        {
+            _isPanning = true;
+            _panOriginHorizontal = ImageScroller.HorizontalOffset;
+            _panOriginVertical = ImageScroller.VerticalOffset;
+        }
+        else
+        {
+            _isMarqueeing = true;
+            DrawMarquee(_dragOrigin, _dragOrigin);
+            MarqueeRect.Visibility = Visibility.Visible;
+        }
+
+        ImageScroller.CapturePointer(e.Pointer);
+        ApplyToolCursor();
+        e.Handled = true;
+    }
+
+    private void ImageScroller_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isPanning && !_isMarqueeing) return;
+
+        var position = e.GetCurrentPoint(ImageScroller).Position;
+
+        if (_isPanning)
+        {
+            // The image follows the pointer, so the viewport travels the opposite way.
+            // Out-of-range offsets are clamped by ChangeView, which is what stops the pan
+            // at the edges of the image.
+            ImageScroller.ChangeView(
+                _panOriginHorizontal - (position.X - _dragOrigin.X),
+                _panOriginVertical - (position.Y - _dragOrigin.Y),
+                null,
+                disableAnimation: true);
+        }
+        else
+        {
+            DrawMarquee(_dragOrigin, ClampToScroller(position));
+        }
+
+        e.Handled = true;
+    }
+
+    private void ImageScroller_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isPanning && !_isMarqueeing) return;
+
+        if (_isMarqueeing)
+            ZoomToMarquee(ClampToScroller(e.GetCurrentPoint(ImageScroller).Position));
+
+        ImageScroller.ReleasePointerCapture(e.Pointer);
+        EndDrag();
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Ends a drag the pointer was taken away from — another window, a touch cancelled by
+    /// the system. The marquee is abandoned rather than applied: no release was seen, so
+    /// there is no rectangle the user actually chose.
+    /// </summary>
+    private void ImageScroller_PointerCaptureLost(object sender, PointerRoutedEventArgs e) =>
+        EndDrag();
+
+    private void EndDrag()
+    {
+        _isPanning = false;
+        _isMarqueeing = false;
+        MarqueeRect.Visibility = Visibility.Collapsed;
+        ApplyToolCursor();
+    }
+
+    /// <summary>
+    /// Keeps a dragged point inside the pane. The pointer is captured, so it reports
+    /// positions well outside the scroller once the drag leaves it — and the overlay
+    /// Canvas does not clip, so an unclamped rectangle would be drawn across the form.
+    /// </summary>
+    private Point ClampToScroller(Point point) => new(
+        Math.Clamp(point.X, 0, ImageScroller.ActualWidth),
+        Math.Clamp(point.Y, 0, ImageScroller.ActualHeight));
+
+    private void DrawMarquee(Point from, Point to)
+    {
+        Canvas.SetLeft(MarqueeRect, Math.Min(from.X, to.X));
+        Canvas.SetTop(MarqueeRect, Math.Min(from.Y, to.Y));
+        MarqueeRect.Width = Math.Abs(to.X - from.X);
+        MarqueeRect.Height = Math.Abs(to.Y - from.Y);
+    }
+
+    /// <summary>
+    /// Zooms the pane so the dragged rectangle fills it.
+    /// </summary>
+    private void ZoomToMarquee(Point end)
+    {
+        var width = Math.Abs(end.X - _dragOrigin.X);
+        var height = Math.Abs(end.Y - _dragOrigin.Y);
+
+        // A click, or a hand that slipped during one, is not a selection.
+        if (width < 16 || height < 16) return;
+
+        var viewportWidth = ImageScroller.ViewportWidth;
+        var viewportHeight = ImageScroller.ViewportHeight;
+        if (viewportWidth <= 0 || viewportHeight <= 0) return;
+
+        var current = ImageScroller.ZoomFactor;
+        var target = Math.Clamp(
+            current * Math.Min(viewportWidth / width, viewportHeight / height),
+            ImageScroller.MinZoomFactor,
+            ImageScroller.MaxZoomFactor);
+
+        // Scroll offsets are measured in zoomed content pixels, so the selection's corner
+        // moves by exactly the ratio between the old zoom and the new one.
+        var scale = target / current;
+        var left = Math.Min(_dragOrigin.X, end.X);
+        var top = Math.Min(_dragOrigin.Y, end.Y);
+
+        ImageScroller.ChangeView(
+            (ImageScroller.HorizontalOffset + left) * scale,
+            (ImageScroller.VerticalOffset + top) * scale,
+            (float)target,
+            disableAnimation: false);
+    }
+
+    /// <summary>
+    /// Copies a zoom the view applied on its own back into the ViewModel, so the
+    /// percentage label stays honest after a marquee, a ctrl+wheel or a pinch — none of
+    /// which pass through the zoom commands.
+    /// </summary>
+    private void ImageScroller_ViewChanged(object sender, ScrollViewerViewChangedEventArgs e)
+    {
+        if (Math.Abs(ImageScroller.ZoomFactor - ViewModel.ZoomFactor) < 0.0001) return;
+
+        _syncingZoomFromView = true;
+        try
+        {
+            ViewModel.ZoomFactor = ImageScroller.ZoomFactor;
+        }
+        finally
+        {
+            _syncingZoomFromView = false;
+        }
+    }
+
+    private void ImageScroller_PointerEntered(object sender, PointerRoutedEventArgs e)
+    {
+        _pointerOverImage = true;
+        ApplyToolCursor();
+    }
+
+    private void ImageScroller_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        _pointerOverImage = false;
+        ApplyToolCursor();
+    }
+
+    /// <summary>
+    /// Names the active tool in the pointer while it is over the image pane.
+    /// </summary>
+    /// <remarks>
+    /// The cursor is assigned to the page, not to the scroller. ScrollViewer is sealed and
+    /// <c>UIElement.ProtectedCursor</c> is protected, so only an element's own class can
+    /// set its cursor, and the page is the nearest ancestor this screen owns — hence the
+    /// hover tracking that restores the arrow on the way out. Controls that set a cursor
+    /// of their own, a text box for one, still win: they sit deeper in the tree.
+    /// </remarks>
+    private void ApplyToolCursor()
+    {
+        var shape = (_isPanning, _isMarqueeing, _pointerOverImage) switch
+        {
+            (true, _, _) => InputSystemCursorShape.SizeAll,
+            (_, true, _) => InputSystemCursorShape.Cross,
+            (_, _, true) => ViewModel.SelectedImageTool == InvoiceImageTool.Marquee
+                ? InputSystemCursorShape.Cross
+                : InputSystemCursorShape.Hand,
+            _ => InputSystemCursorShape.Arrow
+        };
+
+        ProtectedCursor = InputSystemCursor.Create(shape);
     }
 
     private async void OpenFile_Click(object sender, RoutedEventArgs e)
