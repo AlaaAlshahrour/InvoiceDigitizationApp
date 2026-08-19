@@ -181,10 +181,23 @@
             </InfoBar.Content>
         </InfoBar>
 
-        <!-- Split view: form on one side, the invoice image on the other -->
+        <!--
+          Split view: form on one side, the invoice image on the other.
+
+          Two parts form to one part image. The form side carries a seven-column line-items
+          grid whose product picker, quantity, unit price and line total all need room to be
+          read and edited; the image side only has to stay legible, and it has its own zoom,
+          pan and marquee for anything closer. An even split left the grid's columns
+          squeezed to the point of trimming product names while the image sat with margins
+          it did not need.
+
+          Star sizing rather than fixed widths, so the ratio holds at any window size, and
+          either pane can still be collapsed entirely from the toolbar — the remaining one
+          takes the whole row because the collapsed pane's star share goes with it.
+        -->
         <Grid Grid.Row="4" ColumnSpacing="10">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" MinWidth="0" />
+                <ColumnDefinition Width="2*" MinWidth="0" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" MinWidth="0" />
             </Grid.ColumnDefinitions>

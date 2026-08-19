@@ -675,7 +675,14 @@ public partial class ProcessingViewModel : ViewModelBase
             RawOcrText = null;
             HasUnsavedChanges = false;
 
-            SetError(item.ErrorMessage ?? "فشل استخراج هذا الملف. يمكنك إدخاله يدويًا.");
+            // Told apart deliberately. A file the loop never reached is not a file whose
+            // extraction failed, and saying so sent the user off to re-scan a perfectly
+            // good invoice. An item carrying no error message is exactly that case: every
+            // real failure path sets one, so a null here means nothing was ever attempted.
+            SetError(item.ErrorMessage ?? (item.State == BatchItemState.Pending
+                ? "لم تتم معالجة هذا الملف بعد. أعد تشغيل الاستيراد أو أدخِله يدويًا."
+                : "فشل استخراج هذا الملف. يمكنك إدخاله يدويًا."));
+
             RefreshBatchState();
             return;
         }

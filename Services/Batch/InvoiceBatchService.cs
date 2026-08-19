@@ -46,6 +46,33 @@ public sealed class InvoiceBatchService : IInvoiceBatchService
 
     private CancellationTokenSource? _cancellation;
 
+    /// <summary>
+    /// The context <see cref="Changed"/> is raised on — the UI thread's, captured when a
+    /// batch starts.
+    /// </summary>
+    /// <remarks>
+    /// Every await in the processing loop is <c>ConfigureAwait(false)</c>, so from the
+    /// first real I/O onward the loop runs on a thread-pool thread. <see cref="Changed"/>
+    /// is subscribed by the verification ViewModel, whose handler raises
+    /// <c>PropertyChanged</c> for the batch properties the page binds with <c>x:Bind</c>
+    /// and calls <c>NotifyCanExecuteChanged</c> on its commands — all of which reach into
+    /// the WinUI binding engine and touch DependencyObjects.
+    ///
+    /// Raised from the wrong thread that throws <c>RPC_E_WRONG_THREAD</c>, and it threw
+    /// from inside the loop but *outside* the per-item try/catch: the exception escaped
+    /// <see cref="StartAsync"/> entirely. The batch therefore stopped after the first
+    /// file — which had already been extracted and had its result assigned — and the
+    /// caller's guard reported a failed batch without ever displaying it. The user saw a
+    /// failure over an invoice that was extracted perfectly, the remaining files were
+    /// left <see cref="BatchItemState.Pending"/> and unprocessed, and stepping away and
+    /// back showed the first invoice correctly because that path re-read the item the
+    /// loop had in fact completed.
+    ///
+    /// A plain BCL type, so this stays testable headlessly: outside a UI there is no
+    /// current context and the event is raised inline, exactly as before.
+    /// </remarks>
+    private SynchronizationContext? _uiContext;
+
     public InvoiceBatchService(
         Func<IAiServiceClient> clientFactory,
         IDuplicateDetectionService duplicates,
@@ -80,7 +107,29 @@ public sealed class InvoiceBatchService : IInvoiceBatchService
 
     public event EventHandler? Changed;
 
-    private void RaiseChanged() => Changed?.Invoke(this, EventArgs.Empty);
+    /// <summary>
+    /// Raises <see cref="Changed"/> on the thread the batch was started from.
+    /// </summary>
+    /// <remarks>
+    /// <c>Post</c>, not <c>Send</c>: the loop has no need to wait for the UI to finish
+    /// repainting, and blocking a thread-pool thread on the UI thread while the UI thread
+    /// may be awaiting the batch is how a deadlock gets written.
+    /// </remarks>
+    private void RaiseChanged()
+    {
+        if (Changed is not { } handler) return;
+
+        var context = _uiContext;
+
+        // Already on the right thread — or there is no context at all, as in the tests.
+        if (context is null || context == SynchronizationContext.Current)
+        {
+            handler(this, EventArgs.Empty);
+            return;
+        }
+
+        context.Post(_ => handler(this, EventArgs.Empty), null);
+    }
 
     // ---- processing -------------------------------------------------------
 
@@ -92,6 +141,10 @@ public sealed class InvoiceBatchService : IInvoiceBatchService
         CancellationToken ct = default)
     {
         if (IsProcessing) return;
+
+        // Captured before the first await, which is the last moment this is guaranteed to
+        // be the caller's thread. Every Changed after it is marshalled back here.
+        _uiContext = SynchronizationContext.Current;
 
         // Anything left from a previous batch is discarded first, so its files do not
         // linger and its indices cannot be confused with the new run's.
